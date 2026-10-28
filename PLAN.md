@@ -80,8 +80,27 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
       glyph onto the Direct3D picture, which was read back from the GPU (waiting for it) and
       loaded again each frame; such blits are drawn by GL now (`d3d::blit`). `rep movs/stos`
       in one go (`rt_string`). With trees in view ~90 pictures a second (59 at worst before)
-- [ ] Engine functions in Rust instead of recompiled x87 (vertex transforms: DLL 0x10013f20
-      ~12%, 0x10008080 ~10%, 0x100085e0 ~10% with trees in view)
+- [ ] Our own renderer for missions instead of the engine's CPU drawing (the goal: ~10x).
+      Replacing single engine functions does not pay: 0x10013f20 (project a point, 1.1
+      million calls a second) in Rust was only ~2x faster (the switch from recompiled code
+      to the host costs as much as the maths) and saved 0.2 ms a picture. Measured with
+      trees in view (~11 ms a picture): the scene walk 0x10003380 (from sub_10001540, from
+      DisplayCurrentHole) takes 8.6 ms, of it afDrawObj (objects such as trees, ~135 a
+      picture) 4.7 ms; afDrawAnimModel (hogs) 0.5 ms. Not the GPU (drawing nothing: ~10%
+      faster), not the transaction's page faults (none: no change).
+      Plan: the landscape first (map and heights on the GPU once, the camera per picture),
+      then objects, then hogs. Known so far:
+      - afSetMap(map): the EXE's map is 64x64 tiles of 0x14 bytes (+0 height word, +0xe
+        type in the low 7 bits, +0x12 texture word); the engine's grid is 65x65 corners of
+        0x68 bytes at 0x11afaa38 (rows 0x1a68 apart): x and z floats at -8 and -4 (-0x4000 +
+        0x200 a tile), height*2 at +0, type at +0x30. Heights change in play
+        (afAdjustMapHeights, afAdjustMapTile: craters).
+      - Files (OpenHoW describes them): .PMG landscape (16x16 blocks of 368 bytes: 25 corners,
+        16 tiles), .POG objects, .PTG textures, .MAD models.
+      - 0x10003380 walks the scene by tiles and also draws objects, hogs, text and lines
+        (calls afDrawObj, afDrawAnimModel, afDrawText, afDraw3dLine, 0x1000ea50 ...): next
+        to read, with how it lights, fogs and textures a tile and whether it relies on the
+        order of drawing (z-buffer or not)
 - [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
       places (afSetObjPos / afDrawObj arguments, or the objects behind them)
 - [ ] More speed: profile with `HOGS_SAMPLE=1` (DLL 0x10013f20, 0x10008080, 0x100085e0,

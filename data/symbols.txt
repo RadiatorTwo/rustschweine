@@ -83,3 +83,12 @@
 0x1001ecf0 _strcspn
 0x1001ed30 _strncmp
 0x1001ed70 _strpbrk
+
+# engine (_d3d.dll): the mission's 3D scene
+0x10004f50 DisplayCurrentHole (export; a, b, clock -> [0x10032c28], draw ground?): the scene
+0x10001540 draw_ground?       field of view, then 0x10003380(0x270f, 0)
+0x10003380 scene_walk?        walks the map by tiles; draws ground, objects (afDrawObj), hogs, text, lines
+0x10013f20 project_point      (point): sway (two sine tables by the clock), camera, rotation, perspective; cached per picture (+0x20)
+0x11afaa38 map_grid           65x65 corners of 0x68 bytes (rows 0x1a68): x -8, z -4, height*2 +0, type +0x30
+0x1002c524 camera_pos         x, y, z floats (engine)
+0x1002c51c screen_centre      x, y ints
