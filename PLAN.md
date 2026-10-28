@@ -68,9 +68,20 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
 ### Speed
 - [x] Front end too fast (2026-10-28): it has no clock and relied on Flip waiting for the
       monitor; Flip now waits for a 60 Hz refresh (`ddraw::vertical_blank`)
-- [ ] Missions run at 25 frames a second by design (logic step 40 ms at
-      `[[0x537f24] + 0x314]`, one picture per step, 0x47f930). More frames need drawing
-      between steps with interpolated positions (as future_rust_cop's `fps.rs` does)
+- [ ] Unlimited frame rate in missions, game speed unchanged (as future_rust_cop's `fps.rs`):
+      the logic keeps its 40 ms steps; while the loop waits, the drawing runs again with the
+      camera and the objects placed between the last two steps. Found so far (2026-10-28):
+      - main loop 0x47e360: PeekMessage, then 0x47f930 (the step) each round
+      - 0x47f930: step due when `timeGetTime - [0x520884] >= [[0x537f24] + 0x314]` (40);
+        catch-up loop 0x47fb10...0x47fc19 runs the logic (0x49fea0, ecx = [0x537f98]) per
+        step, then draws once: 0x44e290 (ecx = [0x51c4f8]) at 0x47fc49
+      - 0x44e290 calls the engine per picture: Begin3D, AddDisplayWindow (the view),
+        DisplayCurrentHole (terrain), afDrawObj / afAddObjectToSortList (~135 objects),
+        afSetObjPos + afDrawAnimModel (the hogs), afDraw2dPolyIn3dWorld (~145 effects),
+        End3D, Begin2D, afDrawText (HUD), End2D, CopyToScreen
+      To find: where the camera and the objects' places are (or interpolate the engine
+      calls' arguments, matched by object), whether 0x44e290 changes game state (must not)
+- [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)
 
 ### 5. Rest
 - [ ] DirectSound works for the front end's sounds (from future_rust_cop); check in game
