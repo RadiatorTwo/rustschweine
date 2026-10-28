@@ -33,11 +33,15 @@ one of these comes up:
 - [ ] Decompiler for understanding the game: when working on the renderer in `_d3d.dll`
       (step 4: resolution, widescreen, how it uses Direct3D) or on crashes in game logic
 
-How: `warhogs.exe` and `Data/_d3d.dll` as two programs in one Ghidra project, auto-analysis
-with defaults (Function ID on), export each as JSON (addr, size, name; the format of
-future_rust_cop's `data/functions.json`) to `data/warhogs_functions.json` and
-`data/d3d_functions.json` (boundaries and names only: fine to commit). Then: a comparison
-tool, names into `data/symbols.txt`.
+How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
+1. File > New Project (Non-Shared), then File > Import File: `game_files/cd/warhogs.exe`
+   and `game_files/cd/Data/_d3d.dll` (format "Portable Executable (PE)", the default).
+2. Open each (double-click), answer "Analyze now?" with Yes, keep the default analyzers
+   (Function ID is on), Analyze; wait until the progress bar at the bottom right is gone.
+3. Window > Script Manager > "Manage Script Directories" (the list icon): add
+   `tools/ghidra` of this repo; run `ExportFunctions` (category Export) and save as
+   `data/warhogs_functions.json` / `data/d3d_functions.json` (boundaries and names only:
+   fine to commit). Then: a comparison tool, names into `data/symbols.txt`.
 
 ### 2. Code
 - [ ] `fnsave`/`frstor` in the lifter (DLL's C runtime, error path of a math function)
