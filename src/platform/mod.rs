@@ -20,6 +20,7 @@ pub mod dsound;
 pub mod fps;
 pub mod gdi32;
 pub mod gl;
+pub mod ground;
 pub mod kernel32;
 pub mod misc;
 pub mod sample;
@@ -679,6 +680,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[
     (crt::FTOL_DLL, crt::ftol),
     (fps::RENDER, fps::render),
     (fps::STEP, fps::step),
+    (ground::AFTER_GROUND, ground::after_ground),
 ];
 
 /// The loaded engine DLL (Data/_d3d.dll): its exports, for GetProcAddress.

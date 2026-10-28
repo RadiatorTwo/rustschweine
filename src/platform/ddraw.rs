@@ -726,14 +726,35 @@ fn copy(dst: &Surface, src: &Surface, dr: [i32; 4], sr: [i32; 4], key: Option<(u
 
 fn s_blt(c: &mut Cpu) -> u32 {
     let (this, dr, src, sr, flags, fx) = (arg(c, 0), rect(arg(c, 1)), arg(c, 2), rect(arg(c, 3)), arg(c, 4), arg(c, 5));
-    sync(this);
-    sync(src);
-    let mut d = dd();
-    let Some(dst) = d.surfaces.get(&this) else { return DDERR_INVALIDPARAMS };
     if trace() {
         log!("Blt {this:#x} {dr:?} <- {src:#x} {sr:?} flags {flags:#x}");
     }
     let full = |s: &Surface| [0, 0, s.w as i32, s.h as i32];
+    // a copy onto a Direct3D picture not written back yet (a mission's HUD): drawn by GL
+    if flags & DDBLT_COLORFILL == 0 && super::d3d::ahead(this) {
+        sync(src);
+        let d = dd();
+        let (Some(dst), Some(s)) = (d.surfaces.get(&this), d.surfaces.get(&src)) else { return DDERR_INVALIDPARAMS };
+        let key = if flags & DDBLT_KEYSRCOVERRIDE != 0 && fx != 0 {
+            Some((mem().rd32(fx + 0x5c), mem().rd32(fx + 0x60)))
+        } else if flags & DDBLT_KEYSRC != 0 {
+            s.ckey
+        } else {
+            None
+        };
+        let (mut a, mut b) = (dr.unwrap_or(full(dst)), sr.unwrap_or(full(s)));
+        if a[2] - a[0] == b[2] - b[0] && a[3] - a[1] == b[3] - b[1] {
+            clip(dst, Some(s), &mut a, &mut b);
+        }
+        drop(d);
+        if super::d3d::blit(this, src, a, b, key) {
+            return OK;
+        }
+    }
+    sync(this);
+    sync(src);
+    let mut d = dd();
+    let Some(dst) = d.surfaces.get(&this) else { return DDERR_INVALIDPARAMS };
     if flags & DDBLT_COLORFILL != 0 {
         let color = if fx != 0 { mem().rd32(fx + 0x50) } else { 0 };
         if trace() && fx != 0 {

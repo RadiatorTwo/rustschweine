@@ -576,6 +576,7 @@ void main() {
 }
 "#;
 
+#[derive(Clone, Copy)]
 struct Uniforms {
     size: Option<glow::UniformLocation>,
     tex: Option<glow::UniformLocation>,
@@ -589,6 +590,26 @@ struct Uniforms {
     fog: Option<glow::UniformLocation>,
     fog_color: Option<glow::UniformLocation>,
     fog_table: Option<glow::UniformLocation>,
+}
+
+impl Uniforms {
+    fn of(gl: &glow::Context, prog: glow::Program) -> Uniforms {
+        let l = |n: &str| unsafe { gl.get_uniform_location(prog, n) };
+        Uniforms {
+            size: l("size"),
+            tex: l("tex"),
+            textured: l("textured"),
+            color_op: l("color_op"),
+            alpha_op: l("alpha_op"),
+            factor: l("factor"),
+            alpha_func: l("alpha_func"),
+            alpha_ref: l("alpha_ref"),
+            add_specular: l("add_specular"),
+            fog: l("fog"),
+            fog_color: l("fog_color"),
+            fog_table: l("fog_table"),
+        }
+    }
 }
 
 /// A texture surface as a GL texture, and the stamp of the pixels it was made from.
@@ -615,6 +636,10 @@ struct Render {
     textures: HashMap<u32, Tex>,
     /// sources of DirectDraw blits drawn by GL (`blit`), by surface and colour key
     blits: HashMap<(u32, Option<(u32, u32)>), Tex>,
+    /// the program and state GL is set up for (`apply`), and whether the framebuffer is bound:
+    /// set again only when they change (each GL call costs the driver's thread)
+    applied: Option<(glow::Program, Pipe)>,
+    bound: bool,
     /// draws not sent to GL yet: consecutive ones with the same state are drawn as one
     /// (a mission picture has ~1500 small ones)
     batch: Option<(Pipe, Vec<Vertex>)>,
@@ -645,17 +670,7 @@ fn with_render<R>(f: impl FnOnce(&mut Render, &State, &glow::Context) -> R) -> O
         RENDER.with_borrow_mut(|r| {
             let r = r.get_or_insert_with(|| Render::new(gl));
             r.bind(gl, target, &info);
-            let out = STATE.with_borrow(|st| f(r, st, gl));
-            unsafe {
-                // what the window's own drawing expects
-                gl.disable(glow::DEPTH_TEST);
-                gl.disable(glow::CULL_FACE);
-                gl.disable(glow::BLEND);
-                gl.disable(glow::SCISSOR_TEST);
-                gl.depth_mask(true);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
-            out
+            STATE.with_borrow(|st| f(r, st, gl))
         })
     })
 }
@@ -679,7 +694,6 @@ pub fn finish() {
                 r.flush_batch(&g.gl);
             }
         });
-        unsafe { g.gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
     });
 }
 
@@ -719,6 +733,46 @@ pub fn blit(dst: u32, src: u32, dr: [i32; 4], sr: [i32; 4], key: Option<(u32, u3
     }
     let Some(info) = ddraw::info(src).filter(|i| matches!(i.bpp, 16 | 32)) else { return false };
     super::window::with_gl(|g| RENDER.with_borrow_mut(|r| r.as_mut().unwrap().blit(&g.gl, src, &info, dr, sr, key))).is_some()
+}
+
+/// A vertex shader of ours with the device's fragment shader (`own_draw`). Its outputs are
+/// the device's (`diffuse`, `specular`, `uv`, `eye`); `size` is the target's size.
+pub struct OwnProgram {
+    pub prog: glow::Program,
+    u: Uniforms,
+}
+
+pub fn own_program(gl: &glow::Context, vs: &str) -> OwnProgram {
+    let prog = super::gl::compile(gl, vs, FS);
+    OwnProgram { prog, u: Uniforms::of(gl, prog) }
+}
+
+/// What a draw of our own gets (`own_draw`).
+pub struct Own<'a> {
+    pub gl: &'a glow::Context,
+    r: &'a mut Render,
+    st: &'a State,
+}
+
+impl Own<'_> {
+    /// Set GL up as a device draw with the device's current states would be, by our program,
+    /// with `surface` as the texture (0: none).
+    pub fn apply(&mut self, p: &OwnProgram, surface: u32) {
+        let tex = if surface != 0 { self.r.texture(self.gl, surface) } else { None };
+        let mut rs = [0; 64];
+        rs.copy_from_slice(&self.st.rs[..64]);
+        let pipe = Pipe { mode: glow::TRIANGLES, tex, rs, ts: self.st.tss[0], viewport: self.st.viewport };
+        self.r.apply(self.gl, p.prog, &p.u, &pipe);
+    }
+}
+
+/// Draw something of our own into the render target, in order with the device's draws.
+pub fn own_draw(f: impl FnOnce(&mut Own)) {
+    with_render(|r, st, gl| {
+        r.flush_batch(gl);
+        f(&mut Own { gl, r, st });
+        r.ahead = true;
+    });
 }
 
 fn flush_all() {
@@ -777,21 +831,7 @@ fn rgba(info: &ddraw::Info, bottom_first: bool) -> Vec<u32> {
 impl Render {
     fn new(gl: &glow::Context) -> Render {
         let prog = super::gl::compile(gl, VS, FS);
-        let l = |n: &str| unsafe { gl.get_uniform_location(prog, n) };
-        let u = Uniforms {
-            size: l("size"),
-            tex: l("tex"),
-            textured: l("textured"),
-            color_op: l("color_op"),
-            alpha_op: l("alpha_op"),
-            factor: l("factor"),
-            alpha_func: l("alpha_func"),
-            alpha_ref: l("alpha_ref"),
-            add_specular: l("add_specular"),
-            fog: l("fog"),
-            fog_color: l("fog_color"),
-            fog_table: l("fog_table"),
-        };
+        let u = Uniforms::of(gl, prog);
         unsafe {
             let vao = gl.create_vertex_array().expect("GL vertex array");
             let vbo = gl.create_buffer().expect("GL buffer");
@@ -821,6 +861,8 @@ impl Render {
                 vbo,
                 textures: HashMap::new(),
                 blits: HashMap::new(),
+                applied: None,
+                bound: false,
                 batch: None,
             }
         }
@@ -839,6 +881,8 @@ impl Render {
             self.size = (info.w, info.h);
             self.stamp = 0;
             self.ahead = false;
+            self.applied = None;
+            self.bound = false;
             unsafe {
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.depth));
                 gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, info.w as i32, info.h as i32);
@@ -852,7 +896,14 @@ impl Render {
                 gl.clear(glow::DEPTH_BUFFER_BIT);
             }
         }
-        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo)) };
+        self.lost();
+        if !self.bound {
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+                gl.viewport(0, 0, info.w as i32, info.h as i32);
+            }
+            self.bound = true;
+        }
         if self.stamp != info.stamp {
             // DirectDraw wrote the pixels since: they replace the colour, the depth stays
             if self.ahead {
@@ -863,7 +914,15 @@ impl Render {
             self.stamp = info.stamp;
             self.ahead = false;
         }
-        unsafe { gl.viewport(0, 0, info.w as i32, info.h as i32) };
+    }
+
+    /// GL's state was changed by someone else (the window's drawing, a texture loaded): set
+    /// everything again.
+    fn lost(&mut self) {
+        if super::gl::TOUCHED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.applied = None;
+            self.bound = false;
+        }
     }
 
     /// Write the colour texture to the target's pixels.
@@ -874,7 +933,6 @@ impl Render {
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut buf)));
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
         let [_, rm, gm, bm, _] = info.fmt;
         let pack = |c: u8, mask: u32| {
@@ -907,6 +965,8 @@ impl Render {
 
     fn clear(&mut self, gl: &glow::Context, st: &State, rects: &[[i32; 4]], flags: u32, color: u32, z: f32) {
         self.flush_batch(gl);
+        // sets the colour and depth masks and the scissor
+        self.applied = None;
         let mut mask = 0;
         unsafe {
             if flags & 1 != 0 {
@@ -1016,12 +1076,32 @@ impl Render {
     /// Draw the waiting draws.
     fn flush_batch(&mut self, gl: &glow::Context) {
         let Some((pipe, verts)) = self.batch.take() else { return };
-        let (rs, ts, tex, mode) = (&pipe.rs, &pipe.ts, pipe.tex, pipe.mode);
-        let u = &self.u;
+        let u = self.u;
+        self.apply(gl, self.prog, &u, &pipe);
+        unsafe {
+            gl.bind_vertex_array(Some(self.vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+            let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, size_of_val(&verts[..]));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+            gl.draw_arrays(pipe.mode, 0, verts.len() as i32);
+            gl.bind_vertex_array(None);
+        }
+    }
+
+    /// Set GL up to draw into the target with `pipe`'s state, by `prog` (a vertex shader with
+    /// the device's fragment shader; `u` its uniforms).
+    fn apply(&mut self, gl: &glow::Context, prog: glow::Program, u: &Uniforms, pipe: &Pipe) {
+        self.lost();
+        if self.bound && self.applied == Some((prog, *pipe)) {
+            return;
+        }
+        self.applied = Some((prog, *pipe));
+        self.bound = true;
+        let (rs, ts, tex) = (&pipe.rs, &pipe.ts, pipe.tex);
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             gl.viewport(0, 0, self.size.0 as i32, self.size.1 as i32);
-            gl.use_program(Some(self.prog));
+            gl.use_program(Some(prog));
             gl.uniform_2_f32(u.size.as_ref(), self.size.0 as f32, self.size.1 as f32);
             gl.uniform_1_i32(u.tex.as_ref(), 0);
             gl.uniform_1_i32(u.textured.as_ref(), tex.is_some() as i32);
@@ -1093,21 +1173,8 @@ impl Render {
                 _ => gl.disable(glow::CULL_FACE),
             }
             gl.color_mask(true, true, true, true);
-            self.scissor(gl, pipe.viewport);
-
-            gl.bind_vertex_array(Some(self.vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, size_of_val(&verts[..]));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
-            gl.draw_arrays(mode, 0, verts.len() as i32);
-            gl.bind_vertex_array(None);
-            // what the window's own drawing expects
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-            gl.disable(glow::SCISSOR_TEST);
-            gl.depth_mask(true);
         }
+        self.scissor(gl, pipe.viewport);
     }
 }
 

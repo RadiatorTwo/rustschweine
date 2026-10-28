@@ -68,7 +68,12 @@ pub fn texture(gl: &glow::Context, linear: bool) -> glow::Texture {
 }
 
 /// Upload 32-bit words (as their little-endian bytes, RGBA order) to a texture.
+/// Set when GL's state was changed outside the Direct3D device's drawing (a texture bound for
+/// loading, the window drawn): `d3d` sets its state again then.
+pub static TOUCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 pub fn upload(gl: &glow::Context, t: glow::Texture, px: &[u32], w: u32, h: u32) {
+    TOUCHED.store(true, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(t));
         let bytes = std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 4);
@@ -178,10 +183,13 @@ impl Gl {
         let (ox, oy, s) = super::window::fit(fw, fh, w, h);
         let (x0, y0) = (ox / w as f64 * 2.0 - 1.0, 1.0 - oy / h as f64 * 2.0);
         let (x1, y1) = (x0 + fw as f64 * s / w as f64 * 2.0, y0 - fh as f64 * s / h as f64 * 2.0);
+        TOUCHED.store(true, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.viewport(0, 0, w as i32, h as i32);
             gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
             // the window stays opaque: 2D frames' 0RGB words have alpha 0, and a compositor that

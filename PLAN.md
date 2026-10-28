@@ -89,7 +89,18 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
       picture) 4.7 ms; afDrawAnimModel (hogs) 0.5 ms. Not the GPU (drawing nothing: ~10%
       faster), not the transaction's page faults (none: no change).
       Plan: the landscape first (map and heights on the GPU once, the camera per picture),
-      then objects, then hogs. Known so far:
+      then objects, then hogs.
+      Done (2026-10-29): the landscape by the GPU (`ground.rs`: the corners in a vertex
+      buffer, the engine's projection in a shader, drawn at 0x1000c040; the engine's ground
+      off by its visibility masks; `HOGS_GROUND=engine` for comparing). The bigger win was
+      elsewhere: the main thread waited ~40% of the time for the GL driver's thread, which
+      was busy with tens of thousands of calls a picture (GL state reset after every Direct3D
+      call, all uniforms and states set for every batch). GL state is now kept and set only
+      when it changes (`d3d.rs` `applied`, `gl::TOUCHED`). Blt copies onto the Direct3D picture
+      go to GL as BltFast's do. Mission now 120-200 pictures a second (was 85-120), main
+      thread ~90% busy; `HOGS_SAMPLE` names the module and our caller for host time.
+      Next: objects (afDrawObj, trees: 0x10008080, 0x100085e0 are the top of the profile),
+      then hogs. Known so far:
       - afSetMap(map): the EXE's map is 64x64 tiles of 0x14 bytes (+0 height word, +0xe
         type in the low 7 bits, +0x12 texture word); the engine's grid is 65x65 corners of
         0x68 bytes at 0x11afaa38 (rows 0x1a68 apart): x and z floats at -8 and -4 (-0x4000 +
