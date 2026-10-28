@@ -65,6 +65,13 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
 - [ ] Speed: the 640x480 back buffer is read back each frame (fine now; with high
       resolution the 2D blits should be drawn in GL instead, see step 5)
 
+### Speed
+- [x] Front end too fast (2026-10-28): it has no clock and relied on Flip waiting for the
+      monitor; Flip now waits for a 60 Hz refresh (`ddraw::vertical_blank`)
+- [ ] Missions run at 25 frames a second by design (logic step 40 ms at
+      `[[0x537f24] + 0x314]`, one picture per step, 0x47f930). More frames need drawing
+      between steps with interpolated positions (as future_rust_cop's `fps.rs` does)
+
 ### 5. Rest
 - [ ] DirectSound works for the front end's sounds (from future_rust_cop); check in game
 - [x] CD audio tracks (music, 2026-10-28): MCI in `cdaudio.rs`, read from the `.cue`/`.bin`

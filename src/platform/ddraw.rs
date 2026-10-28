@@ -529,7 +529,7 @@ macro_rules! ddraw_methods {
             ("IDirectDraw::RestoreDisplayMode", 1, dd_restore_display_mode),
             ("IDirectDraw::SetCooperativeLevel", 3, dd_set_cooperative_level),
             ("IDirectDraw::SetDisplayMode", $set_mode_args, dd_set_display_mode),
-            ("IDirectDraw::WaitForVerticalBlank", 3, ok),
+            ("IDirectDraw::WaitForVerticalBlank", 3, dd_wait_for_vertical_blank),
             ("IDirectDraw2::GetAvailableVidMem", 4, dd_get_available_vid_mem),
         ]
     };
@@ -571,7 +571,7 @@ static DDRAW7: &[Import] = &[
     ("IDirectDraw7::RestoreDisplayMode", 1, dd_restore_display_mode),
     ("IDirectDraw7::SetCooperativeLevel", 3, dd_set_cooperative_level),
     ("IDirectDraw7::SetDisplayMode", 6, dd_set_display_mode),
-    ("IDirectDraw7::WaitForVerticalBlank", 3, ok),
+    ("IDirectDraw7::WaitForVerticalBlank", 3, dd_wait_for_vertical_blank),
     ("IDirectDraw7::GetAvailableVidMem", 4, dd_get_available_vid_mem),
     ("IDirectDraw7::GetSurfaceFromDC", 3, unsupported),
     ("IDirectDraw7::RestoreAllSurfaces", 1, ok),
@@ -782,8 +782,39 @@ fn s_blt_fast(c: &mut Cpu) -> u32 {
     OK
 }
 
+/// The display's refresh: a flip waits for it (the front end has no clock of its own and
+/// relied on this; its animations ran at 60 frames a second on a 60 Hz monitor). Missions
+/// step at 25 a second by their own clock (40 ms, `[[0x537f24] + 0x314]`), so they never wait.
+const REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+/// Wait until a refresh has passed since the last flip.
+fn vertical_blank() {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = *last {
+        let due = t + REFRESH;
+        // sleep most of it, then spin: sleeping is only exact to a millisecond or so
+        if let Some(d) = due.checked_duration_since(Instant::now()).and_then(|d| d.checked_sub(Duration::from_millis(2))) {
+            std::thread::sleep(d);
+        }
+        while Instant::now() < due {
+            std::hint::spin_loop();
+        }
+        // a late frame starts a new rhythm instead of hurrying the next ones
+        *last = Some(if Instant::now() - due > REFRESH { Instant::now() } else { due });
+    } else {
+        *last = Some(Instant::now());
+    }
+}
+
+fn dd_wait_for_vertical_blank(_: &mut Cpu) -> u32 {
+    vertical_blank();
+    OK
+}
+
 fn s_flip(c: &mut Cpu) -> u32 {
     let this = arg(c, 0);
+    vertical_blank();
     let back = dd().surfaces.get(&this).map_or(0, |s| s.back);
     sync(this);
     sync(back);
