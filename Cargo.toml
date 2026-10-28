@@ -1,0 +1,39 @@
+[package]
+name = "rustschweine"
+version = "0.1.0"
+edition = "2024"
+description = "Hogs of War / Frontschweine (2000) recompiled to native code with Cranelift"
+license = "MIT"
+
+[dependencies]
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-native = "0.137"
+winit = "0.30"
+cpal = "0.18.2"
+glutin = "0.32"
+glutin-winit = "0.5"
+glow = "0.18.0"
+raw-window-handle = "0.6"
+gilrs = "0.11.2"
+sha2 = "0.11.1"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+# assembling test snippets
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "intel", "instr_info", "code_asm"] }

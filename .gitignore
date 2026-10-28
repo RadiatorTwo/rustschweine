@@ -1,0 +1,5 @@
+# the player's own copy of the game: never committed
+/game_files/
+# build output
+/target/
+shot/

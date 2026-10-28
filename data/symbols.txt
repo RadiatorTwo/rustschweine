@@ -1,0 +1,3 @@
+# What we know about the game's functions and data: address, name, description ("?" marks
+# guesses). warhogs.exe at 0x400000, Data/_d3d.dll at 0x10000000 (its exports are named by
+# discovery).
