@@ -764,9 +764,8 @@ fn s_blt(c: &mut Cpu) -> u32 {
 
 fn s_blt_fast(c: &mut Cpu) -> u32 {
     let (this, x, y, src, sr, flags) = (arg(c, 0), arg(c, 1) as i32, arg(c, 2) as i32, arg(c, 3), rect(arg(c, 4)), arg(c, 5));
-    sync(this);
     sync(src);
-    let mut d = dd();
+    let d = dd();
     let (Some(dst), Some(s)) = (d.surfaces.get(&this), d.surfaces.get(&src)) else { return DDERR_INVALIDPARAMS };
     if trace() {
         log!("BltFast {this:#x} ({x},{y}) <- {src:#x} {sr:?} flags {flags:#x}");
@@ -774,7 +773,16 @@ fn s_blt_fast(c: &mut Cpu) -> u32 {
     let mut b = sr.unwrap_or([0, 0, s.w as i32, s.h as i32]);
     let mut a = [x, y, x + b[2] - b[0], y + b[3] - b[1]];
     clip(dst, Some(s), &mut a, &mut b);
-    copy(dst, s, a, b, if flags & DDBLTFAST_SRCCOLORKEY != 0 { s.ckey } else { None });
+    let key = if flags & DDBLTFAST_SRCCOLORKEY != 0 { s.ckey } else { None };
+    // onto a Direct3D picture not written back yet: drawn by GL, the pixels stay behind
+    drop(d);
+    if super::d3d::blit(this, src, a, b, key) {
+        return OK;
+    }
+    sync(this);
+    let mut d = dd();
+    let (Some(dst), Some(s)) = (d.surfaces.get(&this), d.surfaces.get(&src)) else { return DDERR_INVALIDPARAMS };
+    copy(dst, s, a, b, key);
     touched(&mut d, this);
     if this == d.primary {
         changed(&d);

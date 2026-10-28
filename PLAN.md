@@ -76,6 +76,12 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
       batched by state, flips show the GL picture without reading it back, 24-bit x87
       arithmetic inline (it went to `rt_fpu_round`: 41 million calls a second), `__ftol` by
       the host (`crt.rs`)
+- [x] Trees made missions slow (2026-10-28): the HUD and names are BltFast'ed glyph by
+      glyph onto the Direct3D picture, which was read back from the GPU (waiting for it) and
+      loaded again each frame; such blits are drawn by GL now (`d3d::blit`). `rep movs/stos`
+      in one go (`rt_string`). With trees in view ~90 pictures a second (59 at worst before)
+- [ ] Engine functions in Rust instead of recompiled x87 (vertex transforms: DLL 0x10013f20
+      ~12%, 0x10008080 ~10%, 0x100085e0 ~10% with trees in view)
 - [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
       places (afSetObjPos / afDrawObj arguments, or the objects behind them)
 - [ ] More speed: profile with `HOGS_SAMPLE=1` (DLL 0x10013f20, 0x10008080, 0x100085e0,

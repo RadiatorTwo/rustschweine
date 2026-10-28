@@ -335,6 +335,31 @@ pub extern "C" fn rt_string(cpu: *mut Cpu, op: u32) {
     };
     let step = if c.df != 0 { (size as u32).wrapping_neg() } else { size };
     let mask = if size == 4 { u32::MAX } else { (1u32 << (8 * size)) - 1 };
+    // rep movs / rep stos forwards in one go, unless a copy overlaps so that it repeats what
+    // it wrote (destination inside the source)
+    let n = c.r[ECX];
+    if rep != 0 && c.df == 0 && (kind == 0 || kind == 1) && n != 0 {
+        let bytes = n.wrapping_mul(size);
+        let (s, d) = (c.r[ESI], c.r[EDI]);
+        if bytes / size == n && d.checked_add(bytes).is_some() && (kind == 1 || (s.checked_add(bytes).is_some() && (d <= s || d >= s + bytes))) {
+            unsafe {
+                let dp = m.add(d as usize);
+                if kind == 0 {
+                    std::ptr::copy(m.add(s as usize), dp, bytes as usize);
+                    c.r[ESI] = s + bytes;
+                } else if size == 1 {
+                    std::ptr::write_bytes(dp, c.r[EAX] as u8, bytes as usize);
+                } else {
+                    for i in 0..n as usize {
+                        wr(d + (i as u32) * size, c.r[EAX] & mask);
+                    }
+                }
+            }
+            c.r[EDI] = d + bytes;
+            c.r[ECX] = 0;
+            return;
+        }
+    }
     loop {
         if rep != 0 && c.r[ECX] == 0 {
             break;

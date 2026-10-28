@@ -613,6 +613,8 @@ struct Render {
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     textures: HashMap<u32, Tex>,
+    /// sources of DirectDraw blits drawn by GL (`blit`), by surface and colour key
+    blits: HashMap<(u32, Option<(u32, u32)>), Tex>,
     /// draws not sent to GL yet: consecutive ones with the same state are drawn as one
     /// (a mission picture has ~1500 small ones)
     batch: Option<(Pipe, Vec<Vertex>)>,
@@ -707,6 +709,18 @@ pub fn show(stamp: u32) {
     }
 }
 
+/// A DirectDraw blit onto the render target while it holds drawing not written to its pixels
+/// (a mission's text and HUD, glyph by glyph after the 3D): drawn by GL into the picture,
+/// instead of reading the picture back, copying on the CPU and loading it again (reading back
+/// waits for the GPU to finish). False when the target is not ahead.
+pub fn blit(dst: u32, src: u32, dr: [i32; 4], sr: [i32; 4], key: Option<(u32, u32)>) -> bool {
+    if src == dst || !ahead(dst) {
+        return false;
+    }
+    let Some(info) = ddraw::info(src).filter(|i| matches!(i.bpp, 16 | 32)) else { return false };
+    super::window::with_gl(|g| RENDER.with_borrow_mut(|r| r.as_mut().unwrap().blit(&g.gl, src, &info, dr, sr, key))).is_some()
+}
+
 fn flush_all() {
     if let Some(t) = RENDER.with_borrow(|r| r.as_ref().map(|r| r.target)) {
         flush(t);
@@ -720,6 +734,23 @@ fn channel(v: u32, mask: u32) -> u32 {
     }
     let max = mask >> mask.trailing_zeros();
     ((v & mask) >> mask.trailing_zeros()) * 255 / max
+}
+
+/// A blit source's pixels as RGBA bytes, top row first: opaque, transparent inside the colour
+/// key range.
+fn keyed(info: &ddraw::Info, key: Option<(u32, u32)>) -> Vec<u32> {
+    let m = mem();
+    let [_, r, g, b, _] = info.fmt;
+    let mut out = Vec::with_capacity((info.w * info.h) as usize);
+    for y in 0..info.h {
+        let row = info.pixels + y * info.pitch;
+        for x in 0..info.w {
+            let v = if info.bpp == 16 { m.rd16(row + 2 * x) as u32 } else { m.rd32(row + 4 * x) };
+            let a = if key.is_some_and(|(lo, hi)| v >= lo && v <= hi) { 0 } else { 0xff00_0000 };
+            out.push(channel(v, r) | channel(v, g) << 8 | channel(v, b) << 16 | a);
+        }
+    }
+    out
 }
 
 /// A surface's pixels as RGBA bytes (in little-endian words), top or bottom row first.
@@ -789,6 +820,7 @@ impl Render {
                 vao,
                 vbo,
                 textures: HashMap::new(),
+                blits: HashMap::new(),
                 batch: None,
             }
         }
@@ -922,6 +954,47 @@ impl Render {
             dump(surface, &px, info.w, info.h);
         }
         Some(t.tex)
+    }
+
+    /// Queue a blit of `src`'s rectangle `sr` to the rectangle `dr` (`blit`): a textured quad
+    /// whose colour-keyed texels fail the alpha test.
+    fn blit(&mut self, gl: &glow::Context, src: u32, info: &ddraw::Info, dr: [i32; 4], sr: [i32; 4], key: Option<(u32, u32)>) {
+        if self.blits.get(&(src, key)).is_none_or(|t| t.stamp != info.stamp) {
+            self.flush_batch(gl);
+        }
+        let t = self.blits.entry((src, key)).or_insert_with(|| Tex { tex: super::gl::texture(gl, false), stamp: 0 });
+        if t.stamp != info.stamp {
+            super::gl::upload(gl, t.tex, &keyed(info, key), info.w, info.h);
+            t.stamp = info.stamp;
+        }
+        let tex = Some(t.tex);
+        let mut rs = [0; 64];
+        rs[RS_ALPHATESTENABLE] = 1;
+        rs[RS_ALPHAFUNC] = 5; // greater than 0
+        rs[RS_CULLMODE] = 1;
+        let mut ts = [0; 32];
+        ts[TSS_COLOROP] = 2; // the texture
+        ts[TSS_COLORARG1] = 2;
+        ts[TSS_ALPHAOP] = 2;
+        ts[TSS_ALPHAARG1] = 2;
+        ts[TSS_ADDRESSU] = 3;
+        ts[TSS_ADDRESSV] = 3;
+        ts[TSS_MAGFILTER] = 1;
+        ts[TSS_MINFILTER] = 1;
+        let pipe = Pipe { mode: glow::TRIANGLES, tex, rs, ts, viewport: [0, 0, self.size.0, self.size.1] };
+        // pixel edges are half a pixel before the centres
+        let (x0, y0, x1, y1) = (dr[0] as f32 - 0.5, dr[1] as f32 - 0.5, dr[2] as f32 - 0.5, dr[3] as f32 - 0.5);
+        let (w, h) = (info.w as f32, info.h as f32);
+        let (u0, v0, u1, v1) = (sr[0] as f32 / w, sr[1] as f32 / h, sr[2] as f32 / w, sr[3] as f32 / h);
+        let v = |x, y, u, v| Vertex { pos: [x, y, 0.0, 1.0], uv: [u, v], diffuse: !0, specular: 0 };
+        let quad = [v(x0, y0, u0, v0), v(x1, y0, u1, v0), v(x0, y1, u0, v1), v(x1, y0, u1, v0), v(x1, y1, u1, v1), v(x0, y1, u0, v1)];
+        match &mut self.batch {
+            Some((p, v)) if *p == pipe => v.extend_from_slice(&quad),
+            _ => {
+                self.flush_batch(gl);
+                self.batch = Some((pipe, quad.to_vec()));
+            }
+        }
     }
 
     /// Queue a draw: it joins the waiting ones when its state is theirs.
@@ -1174,3 +1247,4 @@ fn draw(kind: u32, fvf: u32, verts: u32, n: u32, seq: &[u32]) {
         with_render(|r, st, gl| r.draw(gl, st, mode, &vs));
     }
 }
+
