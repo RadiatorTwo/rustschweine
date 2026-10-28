@@ -40,3 +40,46 @@
 0x51d3d0 cd_tracks           per track (8 bytes): audio flag, length (MSF)
 0x51d790 g_mixer             mixer handle
 0x52088c g_cd_volume_start   the mixer's CD volume when the game started
+
+# names from Ghidra's analysis (Function ID: C runtime; import stubs)
+0x414e30  CRect
+0x4ab010  DirectDrawCreateEx
+0x4ab016  DirectDrawEnumerateExA
+0x4ab01c  DirectSoundCreate
+0x4ab022  DirectInputCreateEx
+0x4adec0  __fpmath
+0x4ae2a0  __global_unwind2
+0x4ae2e2  __local_unwind2
+0x4ae34a  __abnormal_termination
+0x4ae36d  __NLG_Notify1
+0x4ae390  __ftol
+0x4aee70  __exit
+0x4aef60  _strncpy
+0x4af4e0  _strncmp
+0x4af740  entry           the EXE's entry point (C runtime start-up)
+0x4af8e0  __amsg_exit
+0x4afb80  __setdefaultprecision
+0x4b0b60  __CallSettingFrame@12
+0x4b0c1e  _abort
+0x4b3307  __startOneArgErrorHandling
+0x4b3395  __fload_withFB
+0x4b53b0  _abort
+0x4b5450  __aulldiv
+0x4b54c0  __aullrem
+0x4ba380  RtlUnwind
+0x100141b0 __fpmath
+0x10014210 __ftol
+0x10014700 _strncpy
+0x10014fd0 __exit
+0x10015270 _vfprintf
+0x10015760 _strstr
+0x10015ab0 __amsg_exit
+0x10015af0 __setdefaultprecision
+0x100164e7 __startOneArgErrorHandling
+0x10016575 __fload_withFB
+0x1001a770 __fptrap
+0x1001bdc0 __aulldiv
+0x1001be30 __aullrem
+0x1001ecf0 _strcspn
+0x1001ed30 _strncmp
+0x1001ed70 _strpbrk

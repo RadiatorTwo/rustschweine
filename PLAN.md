@@ -26,10 +26,11 @@ Updated 2026-10-28. Details on how things work: CLAUDE.md.
 
 Not needed for compiling: our own discovery finds the functions. Ask the user for it when
 one of these comes up:
-- [ ] Comparing function boundaries (a one-time check of `find_functions`): when a crash or
-      `rt_lookup` miss points to a wrongly split or missed function
-- [ ] Names of the C runtime (Ghidra's Function ID: memcpy, _ftol, malloc, sprintf ...) for
-      `data/symbols.txt`: at the latest when hooking runtime functions (step 3)
+- [x] Comparing function boundaries (2026-10-28, `examples/ghidra.rs`): Ghidra 12.2 finds
+      1588 + 393 functions; ours miss only 20 C runtime functions nothing calls, and find ~720
+      Ghidra misses (callbacks and vtable entries, reached only through their addresses)
+- [x] Names of the C runtime from Function ID, in `data/symbols.txt` (few: Function ID knows
+      only ~40 of the game's runtime functions; memcpy, malloc, sprintf are not among them)
 - [ ] Decompiler for understanding the game: when working on the renderer in `_d3d.dll`
       (step 4: resolution, widescreen, how it uses Direct3D) or on crashes in game logic
 
