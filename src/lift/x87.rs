@@ -164,8 +164,12 @@ impl Lifter<'_, '_> {
     }
 
     /// x op y as the FPU rounds it. Doubles to nearest when the control word asks for 53
-    /// or 64 bits to nearest; anything else (the renderer's 24 bits, truncating) goes to
-    /// `rt_fpu_round`.
+    /// or 64 bits to nearest. 24 bits to nearest (what Direct3D sets: all of a mission's
+    /// arithmetic, tens of millions of operations a second) rounds the double result to a
+    /// float: exact, as the double is rounded from the exact result and a float's midpoints
+    /// are doubles, unless it falls on such a midpoint or outside the float's normal range
+    /// (the FPU keeps its wider exponent). Those and anything else (24 bits truncating, ...)
+    /// go to `rt_fpu_round`.
     fn arith(&mut self, op: FpuOp, x: Value, y: Value) -> Value {
         let fast = match op {
             FpuOp::Add => self.b.ins().fadd(x, y),
@@ -181,9 +185,68 @@ impl Lifter<'_, '_> {
         // rounding control 00 (to nearest) and precision control 1x (53 or 64 bits)
         let mode = self.b.ins().band_imm_u(cw, 0xe00);
         let usual = self.b.ins().icmp_imm_u(IntCC::Equal, mode, 0x200);
-        let (slow, done) = (self.b.create_block(), self.b.create_block());
+        let (single, midpoint, slow, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.append_block_param(done, F64);
-        self.b.ins().brif(usual, done, &[fast.into()], slow, &[]);
+        self.b.ins().brif(usual, done, &[fast.into()], single, &[]);
+        self.b.switch_to_block(single);
+        // precision control 00 (24 bits), rounding control 00 (to nearest)
+        let mode = self.b.ins().band_imm_u(cw, 0xf00);
+        let is24 = self.b.ins().icmp_imm_u(IntCC::Equal, mode, 0);
+        let f = self.b.ins().fdemote(F32, fast);
+        let f = self.b.ins().fpromote(F64, f);
+        if matches!(op, FpuOp::Round) {
+            self.b.ins().brif(is24, done, &[f.into()], slow, &[]);
+        } else {
+            let a = self.b.ins().fabs(fast);
+            let max = self.b.ins().f64const(f32::MAX as f64);
+            let min = self.b.ins().f64const(f32::MIN_POSITIVE as f64);
+            let zero = self.b.ins().f64const(0.0);
+            let below_max = self.b.ins().fcmp(FloatCC::LessThanOrEqual, a, max);
+            let normal = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, a, min);
+            let is_zero = self.b.ins().fcmp(FloatCC::Equal, a, zero);
+            let low_ok = self.b.ins().bor(normal, is_zero);
+            let in_range = self.b.ins().band(below_max, low_ok);
+            let usable = self.b.ins().band(is24, in_range);
+            let bits = self.b.ins().bitcast(I64, mf(), fast);
+            let low = self.b.ins().band_imm_u(bits, 0x1fff_ffff);
+            let mid = self.b.ins().icmp_imm_u(IntCC::Equal, low, 0x1000_0000);
+            let not_mid = self.b.ins().bnot(mid);
+            let ok = self.b.ins().band(usable, not_mid);
+            let check = self.b.ins().band(usable, mid);
+            let (go, other) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(ok, done, &[f.into()], other, &[]);
+            self.b.switch_to_block(other);
+            self.b.ins().brif(check, midpoint, &[], go, &[]);
+            self.b.switch_to_block(go);
+            self.b.ins().jump(slow, &[]);
+            // on a float's midpoint: fine when the double is the exact result (its error 0)
+            self.b.switch_to_block(midpoint);
+            let err = match op {
+                FpuOp::Add | FpuOp::Sub => {
+                    let y = if matches!(op, FpuOp::Sub) { self.b.ins().fneg(y) } else { y };
+                    // TwoSum
+                    let bv = self.b.ins().fsub(fast, x);
+                    let sb = self.b.ins().fsub(fast, bv);
+                    let e1 = self.b.ins().fsub(x, sb);
+                    let e2 = self.b.ins().fsub(y, bv);
+                    self.b.ins().fadd(e1, e2)
+                }
+                FpuOp::Mul => {
+                    let n = self.b.ins().fneg(fast);
+                    self.b.ins().fma(x, y, n)
+                }
+                FpuOp::Div => {
+                    let n = self.b.ins().fneg(fast);
+                    self.b.ins().fma(n, y, x)
+                }
+                _ => {
+                    let n = self.b.ins().fneg(fast);
+                    self.b.ins().fma(n, fast, x)
+                }
+            };
+            let exact = self.b.ins().fcmp(FloatCC::Equal, err, zero);
+            self.b.ins().brif(exact, done, &[f.into()], slow, &[]);
+        }
         self.b.switch_to_block(slow);
         let o = self.iconst(I32, op as i64);
         let call = self.b.ins().call(self.refs.fpu_round, &[o, x, y, cw]);

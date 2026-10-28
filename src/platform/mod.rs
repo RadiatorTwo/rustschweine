@@ -9,6 +9,7 @@
 pub mod advapi32;
 pub mod bink;
 pub mod cdaudio;
+pub mod crt;
 pub mod d3d;
 pub mod ddraw;
 pub mod dialog;
@@ -16,10 +17,12 @@ pub mod dinput;
 pub mod dplay;
 pub mod display;
 pub mod dsound;
+pub mod fps;
 pub mod gdi32;
 pub mod gl;
 pub mod kernel32;
 pub mod misc;
+pub mod sample;
 pub mod user32;
 pub mod window;
 pub mod winmm;
@@ -30,7 +33,7 @@ use crate::rt::{self, Cpu, EAX, ESP, Event, Memory};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 // guest address space
@@ -100,7 +103,8 @@ pub fn new_cstr(s: &str) -> u32 {
 // ---- guest heap -------------------------------------------------------------------------------
 
 /// Blocks from one arena, 16-byte aligned; free blocks are merged with their neighbours.
-struct Heap {
+#[derive(Clone)]
+pub struct Heap {
     top: u32,
     mapped: u32,
     used: BTreeMap<u32, u32>,
@@ -192,6 +196,23 @@ pub fn alloc_aligned(size: u32, align: u32) -> u32 {
     p
 }
 
+/// The heap's bookkeeping, to put back what an extra picture allocated or freed (`fps.rs`).
+pub fn heap_state() -> Heap {
+    lock(&HEAP).clone()
+}
+
+pub fn set_heap_state(mut h: Heap) {
+    let mut cur = lock(&HEAP);
+    // what was mapped since stays mapped
+    h.mapped = h.mapped.max(cur.mapped);
+    *cur = h;
+}
+
+/// The end of the heap's used part (for debugging tools that compare memory).
+pub fn heap_top() -> u32 {
+    lock(&HEAP).top
+}
+
 /// Free a block from `alloc`; anything else is ignored (returns false).
 pub fn free(p: u32) -> bool {
     let mut h = lock(&HEAP);
@@ -240,6 +261,11 @@ struct Thunk {
 }
 
 static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
+
+/// The name of thunk `k` (for the profiler).
+pub fn thunk_name(k: usize) -> String {
+    lock(&THUNKS).get(k).map_or_else(|| "?".into(), |t| t.name.clone())
+}
 
 fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>) -> u32 {
     let mut t = lock(&THUNKS);
@@ -304,12 +330,20 @@ struct Turn {
 
 static TURN: Turn = Turn { tickets: Mutex::new((0, 0)), cv: Condvar::new() };
 
+/// While set, the thread holding the turn keeps it, also in imports: no other guest thread
+/// runs (an extra picture between the game's steps, `fps.rs`, is undone afterwards and must
+/// not undo another thread's work).
+pub static EXCLUSIVE: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
     pub static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
 }
 
 fn turn_take() {
+    if HELD.get() {
+        return;
+    }
     let mut t = lock(&TURN.tickets);
     let me = t.0;
     t.0 += 1;
@@ -323,6 +357,9 @@ fn turn_take() {
 }
 
 fn turn_give() {
+    if EXCLUSIVE.load(Ordering::Relaxed) {
+        return;
+    }
     HELD.set(false);
     let mut t = lock(&TURN.tickets);
     t.1 += 1;
@@ -333,7 +370,7 @@ fn turn_give() {
 
 /// At a loop head with another thread waiting: let it run first.
 fn turn_yield() {
-    if HELD.get() {
+    if HELD.get() && !EXCLUSIVE.load(Ordering::Relaxed) {
         turn_give();
         turn_take();
     }
@@ -347,6 +384,12 @@ pub fn set_last_error(e: u32) {
 
 /// Call guest code at `addr` with 32-bit arguments (cdecl or stdcall); returns eax.
 pub fn guest_call(c: &mut Cpu, addr: u32, args: &[u32]) -> u32 {
+    // the turn first: guest memory is written only with it (an extra picture, `fps.rs`, undoes
+    // what was written while it ran)
+    let took = !HELD.get();
+    if took {
+        turn_take();
+    }
     let m = mem();
     let esp = c.r[ESP];
     for &a in args.iter().rev() {
@@ -355,10 +398,6 @@ pub fn guest_call(c: &mut Cpu, addr: u32, args: &[u32]) -> u32 {
     }
     c.r[ESP] -= 4;
     m.wr32(c.r[ESP], RET_MAGIC);
-    let took = !HELD.get();
-    if took {
-        turn_take();
-    }
     rt::run(c, addr);
     if took {
         turn_give();
@@ -431,7 +470,9 @@ fn on_event(c: &mut Cpu, e: Event) {
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             let t0 = prof().then(std::time::Instant::now);
             turn_give();
+            sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
             let r = f(c);
+            sample::IN_IMPORT.store(0, Ordering::Relaxed);
             let t1 = prof().then(std::time::Instant::now);
             turn_take();
             if let (Some(t0), Some(t1)) = (t0, t1) {
@@ -474,6 +515,10 @@ fn catch_faults() {
     unsafe extern "system" fn on_fault(info: *mut EXCEPTION_POINTERS) -> i32 {
         let rec = unsafe { &*(*info).ExceptionRecord };
         if rec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION as NTSTATUS {
+            // a write to a page an extra picture may change: saved, and the write goes on
+            if rec.ExceptionInformation[0] == 1 && fps::on_write_fault(rec.ExceptionInformation[1]) {
+                return -1; // EXCEPTION_CONTINUE_EXECUTION
+            }
             let kind = ["read", "write", "execute"].get(rec.ExceptionInformation[0]).unwrap_or(&"access");
             report_fault(kind, rec.ExceptionInformation[1], rec.ExceptionAddress as usize);
         }
@@ -629,7 +674,12 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &[
+    (crt::FTOL_EXE, crt::ftol),
+    (crt::FTOL_DLL, crt::ftol),
+    (fps::RENDER, fps::render),
+    (fps::STEP, fps::step),
+];
 
 /// The loaded engine DLL (Data/_d3d.dll): its exports, for GetProcAddress.
 static ENGINE_EXPORTS: OnceLock<Vec<(u32, String)>> = OnceLock::new();
@@ -688,6 +738,7 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     rt::set_handler(on_event);
     rt::set_yield(turn_yield);
     catch_faults();
+    sample::start();
     if std::env::var_os("HOGS_WATCH").is_some() {
         // where the game is, every 2 s (for hangs)
         std::thread::spawn(|| loop {

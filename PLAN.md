@@ -68,19 +68,21 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
 ### Speed
 - [x] Front end too fast (2026-10-28): it has no clock and relied on Flip waiting for the
       monitor; Flip now waits for a 60 Hz refresh (`ddraw::vertical_blank`)
-- [ ] Unlimited frame rate in missions, game speed unchanged (as future_rust_cop's `fps.rs`):
-      the logic keeps its 40 ms steps; while the loop waits, the drawing runs again with the
-      camera and the objects placed between the last two steps. Found so far (2026-10-28):
-      - main loop 0x47e360: PeekMessage, then 0x47f930 (the step) each round
-      - 0x47f930: step due when `timeGetTime - [0x520884] >= [[0x537f24] + 0x314]` (40);
-        catch-up loop 0x47fb10...0x47fc19 runs the logic (0x49fea0, ecx = [0x537f98]) per
-        step, then draws once: 0x44e290 (ecx = [0x51c4f8]) at 0x47fc49
-      - 0x44e290 calls the engine per picture: Begin3D, AddDisplayWindow (the view),
-        DisplayCurrentHole (terrain), afDrawObj / afAddObjectToSortList (~135 objects),
-        afSetObjPos + afDrawAnimModel (the hogs), afDraw2dPolyIn3dWorld (~145 effects),
-        End3D, Begin2D, afDrawText (HUD), End2D, CopyToScreen
-      To find: where the camera and the objects' places are (or interpolate the engine
-      calls' arguments, matched by object), whether 0x44e290 changes game state (must not)
+- [x] Unlimited frame rate in missions, first stage (2026-10-28, `fps.rs`): the logic keeps
+      its 40 ms steps; while the loop waits, the drawing (0x44e290) runs again as a
+      transaction (game memory write-protected, pages saved at their first write, put back
+      after) with the camera between the last two steps; pictures show the game one step
+      late. 70-110 pictures a second in the first mission. Made fast for it: Direct3D draws
+      batched by state, flips show the GL picture without reading it back, 24-bit x87
+      arithmetic inline (it went to `rt_fpu_round`: 41 million calls a second), `__ftol` by
+      the host (`crt.rs`)
+- [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
+      places (afSetObjPos / afDrawObj arguments, or the objects behind them)
+- [ ] More speed: profile with `HOGS_SAMPLE=1` (DLL 0x10013f20, 0x10008080, 0x100085e0,
+      rt_string; ~400 pages saved per extra picture: leave the back buffer and the engine's
+      vertex buffers out of the transaction)
+- [ ] A setting for the rate (registry, Preferences), as future_rust_cop's `FrameRate`
+- [ ] Linux: the transaction needs mprotect + SIGSEGV (`fps.rs` is Windows only)
 - [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)
 
 ### 5. Rest

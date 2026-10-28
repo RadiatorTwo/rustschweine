@@ -784,7 +784,8 @@ fn s_blt_fast(c: &mut Cpu) -> u32 {
 
 /// The display's refresh: a flip waits for it (the front end has no clock of its own and
 /// relied on this; its animations ran at 60 frames a second on a 60 Hz monitor). Missions
-/// step at 25 a second by their own clock (40 ms, `[[0x537f24] + 0x314]`), so they never wait.
+/// step at 25 a second by their own clock (40 ms, `[[0x537f24] + 0x314]`) and draw pictures
+/// between the steps (`fps.rs`): they do not wait.
 const REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 /// Wait until a refresh has passed since the last flip.
@@ -814,10 +815,20 @@ fn dd_wait_for_vertical_blank(_: &mut Cpu) -> u32 {
 
 fn s_flip(c: &mut Cpu) -> u32 {
     let this = arg(c, 0);
-    vertical_blank();
+    // missions draw as often as they can (or as `fps.rs` caps them)
+    if !super::fps::active() {
+        vertical_blank();
+    }
+    super::fps::stats();
     let back = dd().surfaces.get(&this).map_or(0, |s| s.back);
-    sync(this);
-    sync(back);
+    // a picture Direct3D drew (all of a mission's) is shown from the GPU as it is, not read
+    // back into the surface first: the surface's pixels stay behind until something reads them
+    super::d3d::finish();
+    let drawn = super::d3d::ahead(back);
+    if !drawn {
+        sync(this);
+        sync(back);
+    }
     let mut d = dd();
     if back == 0 || !d.surfaces.contains_key(&back) {
         return DDERR_INVALIDPARAMS;
@@ -830,7 +841,13 @@ fn s_flip(c: &mut Cpu) -> u32 {
     d.surfaces.get_mut(&this).unwrap().pixels = b;
     d.surfaces.get_mut(&back).unwrap().pixels = a;
     shown();
-    present(&d);
+    if drawn {
+        let stamp = d.surfaces[&back].stamp;
+        drop(d);
+        super::d3d::show(stamp);
+    } else {
+        present(&d);
+    }
     OK
 }
 

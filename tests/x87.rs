@@ -25,6 +25,32 @@ fn arith(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.ret()
 }
 
+/// (x, y, cw, out): out = x+y, x-y, x*y, x/y, sqrt|x| as doubles, computed under control
+/// word cw (Direct3D's 24 bits to nearest takes the generated code's float path)
+fn single(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(eax, dword_ptr(esp + 24))?;
+    a.fnstcw(word_ptr(eax + 40))?;
+    a.fldcw(word_ptr(esp + 20))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fadd(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fsub(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 8))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fmul(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 16))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fdiv(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 24))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fabs()?;
+    a.fsqrt()?;
+    a.fstp(qword_ptr(eax + 32))?;
+    a.fldcw(word_ptr(eax + 40))?;
+    a.ret()
+}
+
 /// memcpy of a qword through the FPU: fild/fistp qword [src] -> [dst]
 fn copy64(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.mov(eax, dword_ptr(esp + 4))?;
@@ -106,8 +132,8 @@ fn stack8(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.ret()
 }
 
-const SNIPPETS: [(&str, Snippet); 7] =
-    [("arith", arith), ("copy64", copy64), ("round", round), ("compare", compare), ("mixed", mixed), ("f80", f80), ("stack8", stack8)];
+const SNIPPETS: [(&str, Snippet); 8] =
+    [("arith", arith), ("copy64", copy64), ("round", round), ("compare", compare), ("mixed", mixed), ("f80", f80), ("stack8", stack8), ("single", single)];
 
 fn same(x: f64, y: f64) -> bool {
     x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
@@ -183,6 +209,29 @@ fn x87() {
         assert_eq!(m.slice(SCRATCH, 10), &f64_to_f80(x), "f80 bytes of {x}");
         let back = f64::from_bits(u64::from_le_bytes(m.slice(SCRATCH + 16, 8).try_into().unwrap()));
         assert!(same(back, x), "f80 round trip of {x} gave {back}");
+    }
+    // 24 bits to nearest (inline) and truncating (rt_fpu_round), against rt_fpu_round itself;
+    // floats' sums and products often lie on a float's midpoint
+    for k in 0..20000 {
+        let (mut x, mut y) = (rng.f64(), rng.f64());
+        if k % 2 == 0 {
+            x = x as f32 as f64;
+            y = y as f32 as f64;
+        }
+        if k % 7 == 0 {
+            // small integers: exact sums on midpoints
+            x = (rng.next() % 0x200_0000) as f64;
+            y = (rng.next() % 0x100) as f64;
+        }
+        for cw in [0x3fu32, 0x7f, 0xc3f] {
+            g.call(7, &[dbl(x)[0], dbl(x)[1], dbl(y)[0], dbl(y)[1], cw, SCRATCH]);
+            for (op, at) in [(0u32, 0u32), (1, 8), (2, 16), (3, 24), (4, 32)] {
+                let got = f64::from_bits(u64::from_le_bytes(m.slice(SCRATCH + at, 8).try_into().unwrap()));
+                let a = if op == 4 { x.abs() } else { x };
+                let want = rustschweine::rt::rt_fpu_round(op, a, y, cw);
+                assert!(same(got, want), "op {op} ({x:e}, {y:e}) under cw {cw:#x}: {got:e}, want {want:e}");
+            }
+        }
     }
     assert_eq!(f64_to_f80(1.0), [0, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x3f]);
     assert_eq!(f64_to_f80(-2.0), [0, 0, 0, 0, 0, 0, 0, 0x80, 0x00, 0xc0]);

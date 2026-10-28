@@ -111,6 +111,22 @@ Env: `HOGS_SHOT=file.png` (the shown frame), `HOGS_INPUT` (scripted input, see
 arguments), `HOGS_D3D_DUMP=folder` (textures as PNG), `HOGS_D3D_LOG=<texture hex>` (only its
 draws, all vertices), `HOGS_TRACE_MSG`, `HOGS_D3D_LOG`, `HOGS_DD_LOG`, `HOGS_WATCH`.
 
+### Frame rate (`src/platform/fps.rs`)
+
+Missions step every 40 ms (0x47f930: logic 0x49fea0, then the drawing 0x44e290). Between
+steps the drawing runs again for extra pictures, as a transaction: EXE .data, engine DLL .data
+and the heap are write-protected (`arm`), the exception handler saves each page at its first
+write (`on_write_fault`), afterwards the pages and the heap's bookkeeping are put back; no
+other guest thread runs meanwhile (`EXCLUSIVE`; `guest_call` takes the turn before writing
+guest memory). The camera ([0x537f98]: position floats at [[+0x18]+4], angles +0x84/0x88/0x8c,
+4096 a turn) is set between the last two steps; a step's own picture shows the step before.
+`HOGS_FPS` = cap (0: original), `HOGS_FPS_LOG=1` statistics, `HOGS_SAMPLE=1` a sampling
+profiler (`sample.rs`: guest function / import / host helper the main thread is in).
+Direct3D draws are batched by state (`d3d.rs` `Pipe`); a flip of a Direct3D picture shows the
+GL texture directly (`d3d::show`). x87 under 24 bits to nearest (Direct3D's control word
+0x3f) is computed inline (`lift/x87.rs` `arith`), exact (falls back to `rt_fpu_round` on a
+float's midpoint unless the double was exact, and outside the float's range).
+
 Tools: `cargo run --release --example functions -- game_files/cd [--gaps]` (find + compile
 both programs, statistics), `examples/dis.rs <folder> <addr|all>`, `examples/imports.rs
 <exe or dll>`. `cargo test --release` needs no game files.

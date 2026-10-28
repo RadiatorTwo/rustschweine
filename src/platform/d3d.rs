@@ -331,7 +331,7 @@ static DEVICE7: &[Import] = &[
     ("IDirect3DDevice7::GetCaps", 2, dev_get_caps),
     ("IDirect3DDevice7::EnumTextureFormats", 3, dev_enum_texture_formats),
     ("IDirect3DDevice7::BeginScene", 1, ok),
-    ("IDirect3DDevice7::EndScene", 1, ok),
+    ("IDirect3DDevice7::EndScene", 1, dev_end_scene),
     ("IDirect3DDevice7::GetDirect3D", 2, dev_get_direct3d),
     ("IDirect3DDevice7::SetRenderTarget", 3, dev_set_render_target),
     ("IDirect3DDevice7::GetRenderTarget", 2, dev_get_render_target),
@@ -613,6 +613,19 @@ struct Render {
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     textures: HashMap<u32, Tex>,
+    /// draws not sent to GL yet: consecutive ones with the same state are drawn as one
+    /// (a mission picture has ~1500 small ones)
+    batch: Option<(Pipe, Vec<Vertex>)>,
+}
+
+/// The state a draw depends on: drawn together when equal.
+#[derive(Clone, Copy, PartialEq)]
+struct Pipe {
+    mode: u32,
+    tex: Option<glow::Texture>,
+    rs: [u32; 64],
+    ts: [u32; 32],
+    viewport: [u32; 4],
 }
 
 thread_local! {
@@ -653,6 +666,44 @@ pub fn flush(surface: u32) {
     let ahead = RENDER.with_borrow(|r| r.as_ref().is_some_and(|r| r.ahead && r.target == surface));
     if ahead && let Some(info) = ddraw::info(surface) {
         super::window::with_gl(|g| RENDER.with_borrow_mut(|r| r.as_mut().unwrap().write_back(&g.gl, &info)));
+    }
+}
+
+/// Draw what waits (before a flip shows the picture, and at the end of a scene).
+pub fn finish() {
+    super::window::with_gl(|g| {
+        RENDER.with_borrow_mut(|r| {
+            if let Some(r) = r {
+                r.flush_batch(&g.gl);
+            }
+        });
+        unsafe { g.gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+    });
+}
+
+fn dev_end_scene(_: &mut Cpu) -> u32 {
+    finish();
+    OK
+}
+
+/// Whether `surface` is the render target and has drawing not written to its pixels.
+pub fn ahead(surface: u32) -> bool {
+    surface != 0 && RENDER.with_borrow(|r| r.as_ref().is_some_and(|r| r.ahead && r.target == surface))
+}
+
+/// A flip of the render target that was drawn into (`ahead`): show the colour texture in the
+/// window. The target's pixels changed under it (the flip swaps them): it takes their new
+/// stamp and keeps its colour (Direct3D's pictures cover all of it; the pixels get the
+/// picture written when DirectDraw touches them).
+pub fn show(stamp: u32) {
+    let shown = RENDER.with_borrow_mut(|r| {
+        r.as_mut().map(|r| {
+            r.stamp = stamp;
+            (r.color, r.size)
+        })
+    });
+    if let Some((tex, (w, h))) = shown {
+        super::window::show_texture(tex, w, h, 1.0);
     }
 }
 
@@ -738,12 +789,16 @@ impl Render {
                 vao,
                 vbo,
                 textures: HashMap::new(),
+                batch: None,
             }
         }
     }
 
     /// Bind the framebuffer for `target`: sized to it, holding its pixels.
     fn bind(&mut self, gl: &glow::Context, target: u32, info: &ddraw::Info) {
+        if target != self.target || self.size != (info.w, info.h) || self.stamp != info.stamp {
+            self.flush_batch(gl);
+        }
         if target != self.target || self.size != (info.w, info.h) {
             if self.ahead {
                 log!("warn: Direct3D: render target changed with drawing not written back");
@@ -781,6 +836,7 @@ impl Render {
 
     /// Write the colour texture to the target's pixels.
     fn write_back(&mut self, gl: &glow::Context, info: &ddraw::Info) {
+        self.flush_batch(gl);
         let (w, h) = (info.w, info.h);
         let mut buf = vec![0u8; (w * h * 4) as usize];
         unsafe {
@@ -818,6 +874,7 @@ impl Render {
     }
 
     fn clear(&mut self, gl: &glow::Context, st: &State, rects: &[[i32; 4]], flags: u32, color: u32, z: f32) {
+        self.flush_batch(gl);
         let mut mask = 0;
         unsafe {
             if flags & 1 != 0 {
@@ -849,6 +906,10 @@ impl Render {
     /// The GL texture of a texture surface, loaded again when its pixels changed.
     fn texture(&mut self, gl: &glow::Context, surface: u32) -> Option<glow::Texture> {
         let info = ddraw::info(surface)?;
+        if self.textures.get(&surface).is_none_or(|t| t.stamp != info.stamp) {
+            // waiting draws may use the texture's old pixels
+            self.flush_batch(gl);
+        }
         let t = self.textures.entry(surface).or_insert_with(|| Tex { tex: super::gl::texture(gl, false), stamp: 0 });
         if t.stamp != info.stamp {
             if info.bpp == 8 {
@@ -863,12 +924,30 @@ impl Render {
         Some(t.tex)
     }
 
+    /// Queue a draw: it joins the waiting ones when its state is theirs.
     fn draw(&mut self, gl: &glow::Context, st: &State, mode: u32, verts: &[Vertex]) {
-        let rs = &st.rs;
-        let ts = &st.tss[0];
         let tex = if st.tex[0] != 0 { self.texture(gl, st.tex[0]) } else { None };
+        let mut rs = [0; 64];
+        rs.copy_from_slice(&st.rs[..64]);
+        let pipe = Pipe { mode, tex, rs, ts: st.tss[0], viewport: st.viewport };
+        match &mut self.batch {
+            Some((p, v)) if *p == pipe => v.extend_from_slice(verts),
+            _ => {
+                self.flush_batch(gl);
+                self.batch = Some((pipe, verts.to_vec()));
+            }
+        }
+        self.ahead = true;
+    }
+
+    /// Draw the waiting draws.
+    fn flush_batch(&mut self, gl: &glow::Context) {
+        let Some((pipe, verts)) = self.batch.take() else { return };
+        let (rs, ts, tex, mode) = (&pipe.rs, &pipe.ts, pipe.tex, pipe.mode);
         let u = &self.u;
         unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            gl.viewport(0, 0, self.size.0 as i32, self.size.1 as i32);
             gl.use_program(Some(self.prog));
             gl.uniform_2_f32(u.size.as_ref(), self.size.0 as f32, self.size.1 as f32);
             gl.uniform_1_i32(u.tex.as_ref(), 0);
@@ -941,16 +1020,21 @@ impl Render {
                 _ => gl.disable(glow::CULL_FACE),
             }
             gl.color_mask(true, true, true, true);
-            self.scissor(gl, st.viewport);
+            self.scissor(gl, pipe.viewport);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, size_of_val(verts));
+            let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, size_of_val(&verts[..]));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
             gl.draw_arrays(mode, 0, verts.len() as i32);
             gl.bind_vertex_array(None);
+            // what the window's own drawing expects
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.depth_mask(true);
         }
-        self.ahead = true;
     }
 }
 
