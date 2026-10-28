@@ -97,10 +97,29 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
         (afAdjustMapHeights, afAdjustMapTile: craters).
       - Files (OpenHoW describes them): .PMG landscape (16x16 blocks of 368 bytes: 25 corners,
         16 tiles), .POG objects, .PTG textures, .MAD models.
-      - 0x10003380 walks the scene by tiles and also draws objects, hogs, text and lines
-        (calls afDrawObj, afDrawAnimModel, afDrawText, afDraw3dLine, 0x1000ea50 ...): next
-        to read, with how it lights, fogs and textures a tile and whether it relies on the
-        order of drawing (z-buffer or not)
+      - 0x10003380(first bucket 0x270f, last 0) draws the whole scene: background quad
+        (0x1000b6e0, fog colour), sky objects (sort bucket 0x270f), water mesh (0x1000b440,
+        alpha 0x80, scrolls), then the ground, then 0x1000c040/0x1000c310, then the sort
+        list far to near (12-byte nodes {data, type, next}, bucket = depth >> 3; type 10
+        afDrawObj, 11 afDrawAnimModel, 13 text, 14 2D poly, 15 line, 3 sprites).
+        Objects are not tied to tiles; z-buffer on (LESSEQUAL, z written).
+      - Ground: blocks of 4x4 tiles in a 33x33 window around the camera, skipped by masks
+        (`language	ims
+view00N.bmp`, by yaw); per tile its 4 corners projected
+        (0x10013f20) and 2 triangles (D,C,A)(A,B,D) appended to one of 32 page buffers
+        (0x1013ed08 + p*0xc7380, counts 0x1013e440); flushed at 0x10003b83 by page:
+        SetTexture(page record 0x1004cf90 + p*0xd4, +0) + DrawPrimitive. Then 0x1000c040
+        is called: the place for our own ground (before every object).
+      - Corner (0x68 bytes, 0x11afaa30 + (row*65 + col)*0x68): x +0, z +4, height +8,
+        diffuse +0xc (lit once by SetGroundLightDirection), screen x/y +0x10/+0x14, stamp
+        +0x20, depth d +0x28, rhw +0x2c, z +0x30, u[4] +0x48, v[4] +0x58 (a tile's uv
+        from its corner A, rotation/flip baked by afSetMap), page +0x40, sub-tile +0x42.
+        Page flag (record +0x10 + sub*4) 2: the tile is not drawn (water shows).
+      - Projection (checked): d = third camera row . (p - cam); inv = 1/d if d > 937, else
+        0.0021345 - d*1.139e-6 (no near clipping); x = cx + X*inv, y = cy - Y*inv;
+        rhw = 8*inv; z = max(d*2e-6, 1.527e-5). Fog: table, linear by w.
+      - Not known: SetGroundLightDirection's formula (diffuse changes at run time?),
+        0x1000c040/0x1000c310/0x10009810, sort-list types 0 and 4
 - [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
       places (afSetObjPos / afDrawObj arguments, or the objects behind them)
 - [ ] More speed: profile with `HOGS_SAMPLE=1` (DLL 0x10013f20, 0x10008080, 0x100085e0,
