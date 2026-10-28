@@ -1,3 +1,42 @@
 # What we know about the game's functions and data: address, name, description ("?" marks
 # guesses). warhogs.exe at 0x400000, Data/_d3d.dll at 0x10000000 (its exports are named by
 # discovery).
+
+# start-up
+0x47f7c0 cd_check            CD in drive D: (GetDriveTypeA, D:\PIGS.ID, D:\temp.tmp must not be writable)
+0x47f590 shutdown?           frees the game's objects, puts the CD volume of the start back
+
+# CD audio (MCI, time format TMSF)
+0x45f880 cd_open             opens "cdaudio" (type ID 0x204), sets TMSF, opens the mixer
+0x45f910 cd_close
+0x45f940 cd_media_present    MCI_STATUS_MEDIA_PRESENT
+0x45f980 cd_is_playing       MCI_STATUS_MODE == MCI_MODE_PLAY
+0x45f9d0 cd_read_tracks      fills cd_tracks: per track audio or not, length
+0x45fa30 cd_track_count      MCI_STATUS_NUMBER_OF_TRACKS
+0x45fa70 cd_track_is_audio   MCI_CDA_STATUS_TYPE_TRACK == MCI_CDA_TRACK_AUDIO
+0x45fac0 cd_track_length     MCI_STATUS_LENGTH of a track (MSF)
+0x45fb10 cd_play             (track, last track, ...): plays from a track to the end of a track (-1: first/next audio)
+0x45fc40 cd_stop
+0x45fc70 cd_pause
+0x45fca0 cd_resume?          MCI_PLAY with MCI_TO only (on to the end)
+
+# the mixer's CD volume (0...65535)
+0x45fce0 mixer_open_cd       mixer 0, line of type SRC_COMPACTDISC, its volume control
+0x45fe10 mixer_close
+0x45fe40 mixer_set_cd_volume
+0x45feb0 mixer_get_cd_volume
+
+# sound settings (object at g_sound)
+0x4398e0 sound_init          master 100 (+0x14), effects 80 (+0x1a), +0x1c 100, music share (+0x1e) = CD volume at start / 655
+0x43de70 sound_master        word +0x14, 0...100
+0x43dec0 sound_effects?      word +0x1a, 0...100
+0x43df00 sound_music_share   word +0x1e, 0...100
+0x43e060 sound_music_volume  (fade %): master x music share x fade, as a mixer value (max 0xffdc)
+0x43c720 sound_music_fade    (fade %, clamped to 0...100): sets the CD volume
+
+# data
+0x51bbd4 g_sound             the sound settings object
+0x51d3c8 g_cd_device         MCI device ID
+0x51d3d0 cd_tracks           per track (8 bytes): audio flag, length (MSF)
+0x51d790 g_mixer             mixer handle
+0x52088c g_cd_volume_start   the mixer's CD volume when the game started
