@@ -672,6 +672,7 @@ struct Render {
     /// set again only when they change (each GL call costs the driver's thread)
     applied: Option<(glow::Program, Pipe)>,
     bound: bool,
+    cache: Cache,
     /// draws not sent to GL yet: consecutive ones with the same state are drawn as one
     /// (a mission picture has ~1500 small ones)
     batch: Option<(Pipe, Vec<Vertex>)>,
@@ -772,6 +773,35 @@ pub fn blit(dst: u32, src: u32, dr: [i32; 4], sr: [i32; 4], key: Option<(u32, u3
 pub struct OwnProgram {
     pub prog: glow::Program,
     u: Uniforms,
+}
+
+/// A uniform of an own program (`own_program`) that remembers its value and is sent again
+/// only when that changes (the program is ours alone: nothing else sets it).
+pub struct Uniform {
+    loc: Option<glow::UniformLocation>,
+    last: Vec<f32>,
+}
+
+impl Uniform {
+    pub fn new(gl: &glow::Context, p: &OwnProgram, name: &str) -> Uniform {
+        Uniform { loc: unsafe { gl.get_uniform_location(p.prog, name) }, last: Vec::new() }
+    }
+
+    /// Set it (vec2s or vec3s by `n`) when `v` differs from what it has; the program must be
+    /// in use (after `Own::apply`).
+    pub fn set(&mut self, gl: &glow::Context, n: usize, v: &[f32]) {
+        if self.last == v {
+            return;
+        }
+        unsafe {
+            match n {
+                2 => gl.uniform_2_f32_slice(self.loc.as_ref(), v),
+                _ => gl.uniform_3_f32_slice(self.loc.as_ref(), v),
+            }
+        }
+        self.last.clear();
+        self.last.extend_from_slice(v);
+    }
 }
 
 pub fn own_program(gl: &glow::Context, vs: &str) -> OwnProgram {
@@ -895,6 +925,7 @@ impl Render {
                 blits: HashMap::new(),
                 applied: None,
                 bound: false,
+                cache: Cache::default(),
                 batch: None,
             }
         }
@@ -915,6 +946,8 @@ impl Render {
             self.ahead = false;
             self.applied = None;
             self.bound = false;
+            // the scissor and depth mask set below
+            self.cache = Cache::default();
             unsafe {
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.depth));
                 gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, info.w as i32, info.h as i32);
@@ -954,6 +987,7 @@ impl Render {
         if super::gl::TOUCHED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.applied = None;
             self.bound = false;
+            self.cache = Cache::default();
         }
     }
 
@@ -988,17 +1022,24 @@ impl Render {
     }
 
     /// Draw only into a rectangle (x, y, width, height; y down).
-    fn scissor(&self, gl: &glow::Context, [x, y, w, h]: [u32; 4]) {
+    fn scissor(&mut self, gl: &glow::Context, r @ [x, y, w, h]: [u32; 4]) {
+        if self.cache.scissor == Some(r) {
+            return;
+        }
         unsafe {
-            gl.enable(glow::SCISSOR_TEST);
+            if self.cache.scissor.is_none() {
+                gl.enable(glow::SCISSOR_TEST);
+            }
             gl.scissor(x as i32, self.size.1 as i32 - (y + h) as i32, w as i32, h as i32);
         }
+        self.cache.scissor = Some(r);
     }
 
     fn clear(&mut self, gl: &glow::Context, st: &State, rects: &[[i32; 4]], flags: u32, color: u32, z: f32) {
         self.flush_batch(gl);
         // sets the colour and depth masks and the scissor
         self.applied = None;
+        self.cache.depth_mask = None;
         let mut mask = 0;
         unsafe {
             if flags & 1 != 0 {
@@ -1121,92 +1162,218 @@ impl Render {
     }
 
     /// Set GL up to draw into the target with `pipe`'s state, by `prog` (a vertex shader with
-    /// the device's fragment shader; `u` its uniforms).
+    /// the device's fragment shader; `u` its uniforms). Only what differs from what GL has is
+    /// sent (`Cache`): draws of the device, the ground and the objects take turns, and each GL
+    /// call costs the driver's thread.
     fn apply(&mut self, gl: &glow::Context, prog: glow::Program, u: &Uniforms, pipe: &Pipe) {
         self.lost();
         if self.bound && self.applied == Some((prog, *pipe)) {
             return;
         }
         self.applied = Some((prog, *pipe));
-        self.bound = true;
+        let c = &mut self.cache;
         let (rs, ts, tex) = (&pipe.rs, &pipe.ts, pipe.tex);
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-            gl.viewport(0, 0, self.size.0 as i32, self.size.1 as i32);
-            gl.use_program(Some(prog));
-            gl.uniform_2_f32(u.size.as_ref(), self.size.0 as f32, self.size.1 as f32);
-            gl.uniform_1_i32(u.tex.as_ref(), 0);
-            gl.uniform_1_i32(u.textured.as_ref(), tex.is_some() as i32);
+            if !self.bound {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+                gl.viewport(0, 0, self.size.0 as i32, self.size.1 as i32);
+                self.bound = true;
+            }
+            if c.program != Some(prog) {
+                gl.use_program(Some(prog));
+                c.program = Some(prog);
+            }
             if let Some(t) = tex {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                if c.tex != Some(t) {
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                    c.tex = Some(t);
+                }
                 let filter = |f: u32| if f >= 2 { glow::LINEAR } else { glow::NEAREST } as i32;
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter(ts[TSS_MAGFILTER]));
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter(ts[TSS_MINFILTER]));
                 let wrap = |a: u32| match a {
                     2 => glow::MIRRORED_REPEAT,
                     3 | 4 => glow::CLAMP_TO_EDGE,
                     _ => glow::REPEAT,
                 } as i32;
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, wrap(ts[TSS_ADDRESSU]));
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap(ts[TSS_ADDRESSV]));
+                let want = [filter(ts[TSS_MAGFILTER]), filter(ts[TSS_MINFILTER]), wrap(ts[TSS_ADDRESSU]), wrap(ts[TSS_ADDRESSV])];
+                let have = c.tex_params.entry(t).or_insert([-1; 4]);
+                for (k, name) in [glow::TEXTURE_MAG_FILTER, glow::TEXTURE_MIN_FILTER, glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T].into_iter().enumerate() {
+                    if have[k] != want[k] {
+                        gl.tex_parameter_i32(glow::TEXTURE_2D, name, want[k]);
+                        have[k] = want[k];
+                    }
+                }
             }
-            let ops = |o, a1, a2| (ts[o] as i32, ts[a1] as i32, ts[a2] as i32);
-            let (o, a, b) = ops(TSS_COLOROP, TSS_COLORARG1, TSS_COLORARG2);
-            gl.uniform_3_i32(u.color_op.as_ref(), o, a, b);
-            let (o, a, b) = ops(TSS_ALPHAOP, TSS_ALPHAARG1, TSS_ALPHAARG2);
-            gl.uniform_3_i32(u.alpha_op.as_ref(), o, a, b);
             let argb = |v: u32| [(v >> 16 & 0xff) as f32 / 255.0, (v >> 8 & 0xff) as f32 / 255.0, (v & 0xff) as f32 / 255.0, (v >> 24) as f32 / 255.0];
-            let f = argb(rs[RS_TEXTUREFACTOR]);
-            gl.uniform_4_f32(u.factor.as_ref(), f[0], f[1], f[2], f[3]);
-            gl.uniform_1_i32(u.alpha_func.as_ref(), if rs[RS_ALPHATESTENABLE] != 0 { rs[RS_ALPHAFUNC] as i32 } else { 8 });
-            gl.uniform_1_f32(u.alpha_ref.as_ref(), (rs[RS_ALPHAREF] & 0xff) as f32);
-            gl.uniform_1_i32(u.add_specular.as_ref(), (rs[RS_SPECULARENABLE] != 0) as i32);
+            let ff = |k: usize| f32::from_bits(rs[k]);
             let fog = match (rs[RS_FOGENABLE], rs[RS_FOGTABLEMODE]) {
                 (0, _) => 0,
                 (_, t @ 1..=3) => t as i32 + 1,
                 _ => 1,
             };
-            gl.uniform_1_i32(u.fog.as_ref(), fog);
-            let ff = |k: usize| f32::from_bits(rs[k]);
-            gl.uniform_3_f32(u.fog_table.as_ref(), ff(RS_FOGTABLESTART), ff(RS_FOGTABLEEND), ff(RS_FOGTABLEDENSITY));
             let fc = argb(rs[RS_FOGCOLOR]);
-            gl.uniform_3_f32(u.fog_color.as_ref(), fc[0], fc[1], fc[2]);
+            let want = FsUniforms {
+                size: [self.size.0 as f32, self.size.1 as f32],
+                textured: tex.is_some() as i32,
+                color_op: [ts[TSS_COLOROP] as i32, ts[TSS_COLORARG1] as i32, ts[TSS_COLORARG2] as i32],
+                alpha_op: [ts[TSS_ALPHAOP] as i32, ts[TSS_ALPHAARG1] as i32, ts[TSS_ALPHAARG2] as i32],
+                factor: argb(rs[RS_TEXTUREFACTOR]),
+                alpha_func: if rs[RS_ALPHATESTENABLE] != 0 { rs[RS_ALPHAFUNC] as i32 } else { 8 },
+                alpha_ref: (rs[RS_ALPHAREF] & 0xff) as f32,
+                add_specular: (rs[RS_SPECULARENABLE] != 0) as i32,
+                fog,
+                fog_table: [ff(RS_FOGTABLESTART), ff(RS_FOGTABLEEND), ff(RS_FOGTABLEDENSITY)],
+                fog_color: [fc[0], fc[1], fc[2]],
+            };
+            let have = c.fs.entry(prog).or_insert_with(|| {
+                gl.uniform_1_i32(u.tex.as_ref(), 0);
+                FsUniforms::unknown()
+            });
+            if have.size != want.size {
+                gl.uniform_2_f32(u.size.as_ref(), want.size[0], want.size[1]);
+            }
+            if have.textured != want.textured {
+                gl.uniform_1_i32(u.textured.as_ref(), want.textured);
+            }
+            if have.color_op != want.color_op {
+                gl.uniform_3_i32_slice(u.color_op.as_ref(), &want.color_op);
+            }
+            if have.alpha_op != want.alpha_op {
+                gl.uniform_3_i32_slice(u.alpha_op.as_ref(), &want.alpha_op);
+            }
+            if have.factor != want.factor {
+                gl.uniform_4_f32_slice(u.factor.as_ref(), &want.factor);
+            }
+            if have.alpha_func != want.alpha_func {
+                gl.uniform_1_i32(u.alpha_func.as_ref(), want.alpha_func);
+            }
+            if have.alpha_ref != want.alpha_ref {
+                gl.uniform_1_f32(u.alpha_ref.as_ref(), want.alpha_ref);
+            }
+            if have.add_specular != want.add_specular {
+                gl.uniform_1_i32(u.add_specular.as_ref(), want.add_specular);
+            }
+            if have.fog != want.fog {
+                gl.uniform_1_i32(u.fog.as_ref(), want.fog);
+            }
+            if have.fog_table != want.fog_table {
+                gl.uniform_3_f32_slice(u.fog_table.as_ref(), &want.fog_table);
+            }
+            if have.fog_color != want.fog_color {
+                gl.uniform_3_f32_slice(u.fog_color.as_ref(), &want.fog_color);
+            }
+            *have = want;
 
-            if rs[RS_ALPHABLENDENABLE] != 0 {
-                gl.enable(glow::BLEND);
+            let blend = (rs[RS_ALPHABLENDENABLE] != 0).then(|| match rs[RS_SRCBLEND] {
                 // the "both" factors set the destination's as well
-                let (s, d) = match rs[RS_SRCBLEND] {
-                    12 => (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
-                    13 => (glow::ONE_MINUS_SRC_ALPHA, glow::SRC_ALPHA),
-                    s => (blend(s), blend(rs[RS_DESTBLEND])),
-                };
-                gl.blend_func(s, d);
-            } else {
-                gl.disable(glow::BLEND);
+                12 => (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
+                13 => (glow::ONE_MINUS_SRC_ALPHA, glow::SRC_ALPHA),
+                s => (blend(s), blend(rs[RS_DESTBLEND])),
+            });
+            if c.blend != Some(blend) {
+                match blend {
+                    Some((s, d)) => {
+                        if c.blend.is_none_or(|b| b.is_none()) {
+                            gl.enable(glow::BLEND);
+                        }
+                        gl.blend_func(s, d);
+                    }
+                    None => gl.disable(glow::BLEND),
+                }
+                c.blend = Some(blend);
             }
-            if rs[RS_ZENABLE] != 0 {
-                gl.enable(glow::DEPTH_TEST);
-                gl.depth_func(compare(rs[RS_ZFUNC]));
-            } else {
-                gl.disable(glow::DEPTH_TEST);
+            let depth = (rs[RS_ZENABLE] != 0).then(|| compare(rs[RS_ZFUNC]));
+            if c.depth != Some(depth) {
+                match depth {
+                    Some(f) => {
+                        if c.depth.is_none_or(|d| d.is_none()) {
+                            gl.enable(glow::DEPTH_TEST);
+                        }
+                        gl.depth_func(f);
+                    }
+                    None => gl.disable(glow::DEPTH_TEST),
+                }
+                c.depth = Some(depth);
             }
-            gl.depth_mask(rs[RS_ZWRITEENABLE] != 0 && rs[RS_ZENABLE] != 0);
+            let mask = rs[RS_ZWRITEENABLE] != 0 && rs[RS_ZENABLE] != 0;
+            if c.depth_mask != Some(mask) {
+                gl.depth_mask(mask);
+                c.depth_mask = Some(mask);
+            }
             // both name the order as seen on the screen; GL's front faces are counter-clockwise
-            match rs[RS_CULLMODE] {
-                2 => {
-                    gl.enable(glow::CULL_FACE);
-                    gl.cull_face(glow::BACK);
+            let cull = match rs[RS_CULLMODE] {
+                2 => Some(glow::BACK),
+                3 => Some(glow::FRONT),
+                _ => None,
+            };
+            if c.cull != Some(cull) {
+                match cull {
+                    Some(f) => {
+                        gl.enable(glow::CULL_FACE);
+                        gl.cull_face(f);
+                    }
+                    None => gl.disable(glow::CULL_FACE),
                 }
-                3 => {
-                    gl.enable(glow::CULL_FACE);
-                    gl.cull_face(glow::FRONT);
-                }
-                _ => gl.disable(glow::CULL_FACE),
+                c.cull = Some(cull);
             }
-            gl.color_mask(true, true, true, true);
+            if !c.color_mask {
+                gl.color_mask(true, true, true, true);
+                c.color_mask = true;
+            }
         }
         self.scissor(gl, pipe.viewport);
+    }
+}
+
+/// The GL state `apply` set, so that it sets only what changes (None: not known).
+#[derive(Default)]
+struct Cache {
+    program: Option<glow::Program>,
+    tex: Option<glow::Texture>,
+    /// per texture: magnification and minification filter, wrap s and t
+    tex_params: HashMap<glow::Texture, [i32; 4]>,
+    /// per program: the fragment shader's uniforms
+    fs: HashMap<glow::Program, FsUniforms>,
+    blend: Option<Option<(u32, u32)>>,
+    depth: Option<Option<u32>>,
+    depth_mask: Option<bool>,
+    cull: Option<Option<u32>>,
+    color_mask: bool,
+    scissor: Option<[u32; 4]>,
+}
+
+/// The values of the device's fragment shader's uniforms.
+#[derive(Clone, Copy, PartialEq)]
+struct FsUniforms {
+    size: [f32; 2],
+    textured: i32,
+    color_op: [i32; 3],
+    alpha_op: [i32; 3],
+    factor: [f32; 4],
+    alpha_func: i32,
+    alpha_ref: f32,
+    add_specular: i32,
+    fog: i32,
+    fog_table: [f32; 3],
+    fog_color: [f32; 3],
+}
+
+impl FsUniforms {
+    /// Values no state has: everything is sent the first time.
+    fn unknown() -> FsUniforms {
+        FsUniforms {
+            size: [-1.0; 2],
+            textured: -1,
+            color_op: [-1; 3],
+            alpha_op: [-1; 3],
+            factor: [-1.0; 4],
+            alpha_func: -1,
+            alpha_ref: -1.0,
+            add_specular: -1,
+            fog: -1,
+            fog_table: [f32::NAN; 3],
+            fog_color: [-1.0; 3],
+        }
     }
 }
 

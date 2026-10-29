@@ -55,6 +55,7 @@ pub fn compile(gl: &glow::Context, vs: &str, fs: &str) -> glow::Program {
 
 /// A texture with nearest or linear filtering, clamped.
 pub fn texture(gl: &glow::Context, linear: bool) -> glow::Texture {
+    TOUCHED.store(true, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         let t = gl.create_texture().expect("GL texture");
         gl.bind_texture(glow::TEXTURE_2D, Some(t));

@@ -146,7 +146,12 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
 - [x] Busy CPU (2026-10-29): with all 16 cores loaded a mission fell from ~550 to ~90 pictures
       a second: PeekMessage gave the time slice away when it found nothing (`yield_now`). Not
       in missions now: ~270 under full load. What is left under load is the GL driver
-      (nvoglv64, its own thread): fewer GL calls should help (objects drawn together)
+      (nvoglv64, its own thread)
+- [x] GL calls (2026-10-29): `apply` sends only the states that change (`d3d.rs` `Cache`, per
+      program the fragment uniforms), own programs' uniforms only when changed
+      (`d3d::Uniform`): ~550 -> ~610. Measured: all objects' GL calls together cost ~6%
+      (without them ~670), so drawing objects together (instancing) would bring little and
+      change the drawing order; not done
 - [ ] A setting for the rate (registry, Preferences), as future_rust_cop's `FrameRate`
 - [ ] Linux: the transaction needs mprotect + SIGSEGV (`fps.rs` is Windows only)
 - [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)

@@ -392,7 +392,7 @@ void main() {
 
 struct Gpu {
     prog: d3d::OwnProgram,
-    u: [Option<glow::UniformLocation>; 8],
+    u: [d3d::Uniform; 8],
     vao: glow::VertexArray,
     vbo: glow::Buffer,
 }
@@ -400,7 +400,7 @@ struct Gpu {
 fn gpu(gl: &glow::Context) -> Gpu {
     unsafe {
         let prog = d3d::own_program(gl, VS);
-        let u = ["view", "turn", "light", "shade", "centre", "base", "tint", "how"].map(|n| gl.get_uniform_location(prog.prog, n));
+        let u = ["view", "turn", "light", "shade", "centre", "base", "tint", "how"].map(|n| d3d::Uniform::new(gl, &prog, n));
         let vao = gl.create_vertex_array().expect("GL vertex array");
         let vbo = gl.create_buffer().expect("GL buffer");
         gl.bind_vertex_array(Some(vao));
@@ -598,15 +598,15 @@ fn draw(obj: u32, bones: u32) {
                 for (k, &(_, first, count)) in ranges.iter().enumerate() {
                     own.apply(&g.prog, pages[k]);
                     if k == 0 {
-                        let (u, l) = (&g.u, &look);
-                        gl.uniform_3_f32_slice(u[0].as_ref(), l.view.as_flattened());
-                        gl.uniform_3_f32_slice(u[1].as_ref(), l.turn.as_flattened());
-                        gl.uniform_3_f32_slice(u[2].as_ref(), &l.light);
-                        gl.uniform_3_f32_slice(u[3].as_ref(), &l.shade);
-                        gl.uniform_2_f32_slice(u[4].as_ref(), &l.centre);
-                        gl.uniform_3_f32_slice(u[5].as_ref(), &l.base);
-                        gl.uniform_3_f32_slice(u[6].as_ref(), &l.tint);
-                        gl.uniform_3_f32_slice(u[7].as_ref(), &l.how);
+                        let (u, l) = (&mut g.u, &look);
+                        u[0].set(gl, 3, l.view.as_flattened());
+                        u[1].set(gl, 3, l.turn.as_flattened());
+                        u[2].set(gl, 3, &l.light);
+                        u[3].set(gl, 3, &l.shade);
+                        u[4].set(gl, 2, &l.centre);
+                        u[5].set(gl, 3, &l.base);
+                        u[6].set(gl, 3, &l.tint);
+                        u[7].set(gl, 3, &l.how);
                     }
                     gl.draw_arrays(glow::TRIANGLES, first, count);
                 }

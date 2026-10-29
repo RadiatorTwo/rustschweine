@@ -183,9 +183,9 @@ struct Vertex {
 /// The GL side: the program, the vertex buffer and what it holds (by page).
 struct Gpu {
     prog: d3d::OwnProgram,
-    cam: Option<glow::UniformLocation>,
-    rot: Option<glow::UniformLocation>,
-    centre: Option<glow::UniformLocation>,
+    cam: d3d::Uniform,
+    rot: d3d::Uniform,
+    centre: d3d::Uniform,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     /// the water's, loaded each picture
@@ -260,21 +260,19 @@ fn vertex_array(gl: &glow::Context) -> (glow::VertexArray, glow::Buffer) {
 
 fn gpu(gl: &glow::Context) -> Gpu {
     let prog = d3d::own_program(gl, VS);
-    let l = |n: &str| unsafe { gl.get_uniform_location(prog.prog, n) };
+    let l = |n: &str| d3d::Uniform::new(gl, &prog, n);
     let (cam, rot, centre) = (l("cam"), l("rot"), l("centre"));
     let (vao, vbo) = vertex_array(gl);
     Gpu { prog, cam, rot, centre, vao, vbo, water: vertex_array(gl), verts: Vec::new(), pages: Vec::new() }
 }
 
 /// The camera's uniforms (set after `apply`: the program is in use).
-fn camera(gl: &glow::Context, g: &Gpu) {
+fn camera(gl: &glow::Context, g: &mut Gpu) {
     let m = mem();
     let rot: Vec<f32> = ROT.iter().flatten().map(|&a| f32_at(a)).collect();
-    unsafe {
-        gl.uniform_3_f32(g.cam.as_ref(), f32_at(CAMERA), f32_at(CAMERA + 4), f32_at(CAMERA + 8));
-        gl.uniform_3_f32_slice(g.rot.as_ref(), &rot);
-        gl.uniform_2_f32(g.centre.as_ref(), m.rd32(CENTRE) as i32 as f32, m.rd32(CENTRE + 4) as i32 as f32);
-    }
+    g.cam.set(gl, 3, &[f32_at(CAMERA), f32_at(CAMERA + 4), f32_at(CAMERA + 8)]);
+    g.rot.set(gl, 3, &rot);
+    g.centre.set(gl, 2, &[m.rd32(CENTRE) as i32 as f32, m.rd32(CENTRE + 4) as i32 as f32]);
 }
 
 fn draw_water(tex: u32, verts: &[Vertex]) {
@@ -311,7 +309,7 @@ fn draw() {
                     g.verts = verts;
                 }
                 g.pages = pages;
-                for &(surface, first, count) in &g.pages {
+                for (surface, first, count) in g.pages.clone() {
                     own.apply(&g.prog, surface);
                     camera(gl, g);
                     gl.bind_vertex_array(Some(g.vao));
