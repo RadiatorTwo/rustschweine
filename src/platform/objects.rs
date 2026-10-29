@@ -468,8 +468,8 @@ out float eye;
 void main() {
     // into the camera's space (0x10011810): no nearer than 1.527e-5; with bones (0x10011710)
     // as it is (the engine leaves out triangles behind the camera, GL cuts them). Behind the
-    // camera not as the engine: it put those corners on the near plane, so a tree the camera
-    // walks past was drawn huge over the whole picture (dark stripes); kept behind, GL cuts them
+    // camera not as the engine: it puts those corners on the near plane, so a tree the camera
+    // walks past would be stretched over the picture (and the sky's dome); kept behind, GL cuts them
     int k = how.z != 0.0 ? clamp(int(bone), 0, 31) * 4 : 0;
     vec3 v = vec3(dot(pos, view[k]), dot(pos, view[k + 1]), dot(pos, view[k + 2])) + view[k + 3];
     float z = how.z != 0.0 || v.z < 0.0 ? v.z : max(v.z, 1.527e-5);

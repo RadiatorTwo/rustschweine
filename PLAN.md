@@ -148,12 +148,15 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
 - [x] Ground behind the camera drawn over everything while walking (2026-10-29, ours: the
       engine's masks left those blocks out): cut off at the near plane (`ground.rs` shader;
       the water too, which the engine draws whole)
-- [x] Dark stripes sweeping over the picture when walking and turning (2026-10-29): trees the
-      camera walks past, with corners behind it: the engine (0x10011810) puts those on the near
-      plane (z 1.527e-5), so their triangles were drawn huge over everything for a picture
-      (also with HOGS_OBJECTS=engine, where it stays). Ours keeps them behind (`objects.rs`
-      shader), GL cuts them. Found with `HOGS_SHOT_MS=60` and frames darker than both neighbours
-      (the sky, way 2, also reaches behind the camera all the time: still looks the same)
+- [x] Dark stripes sweeping over the picture when walking along the green path (2026-10-29,
+      second try): the 2D polys in the world (afDraw2dPolyIn3dWorld 0x1000ea50, sort node
+      type drawn at 0x100042d6 as a fan of 4: the green path's patches, alpha 0x80) projected
+      by the engine with corners behind the camera: negative rhw, x and y far off. Our Direct3D
+      shader took w = 1 for rhw <= 0 and drew them at those places; now w = 1/rhw also when
+      negative (x, y were projected by the same depth), GL cuts them at w = 0 (`d3d.rs` VS).
+      Found by every picture (HOGS_SHOT_MS=0, a few seconds), triangles wider than 250 pixels
+      and the return address of DrawPrimitive. The first try (objects' corners behind the
+      camera kept there, `objects.rs`) was not it but stays (right for trees and the sky's dome)
 - [ ] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
       crates falling): they follow the hog by steps (find their positions: afSetObjPos, the
       text's sort entries)

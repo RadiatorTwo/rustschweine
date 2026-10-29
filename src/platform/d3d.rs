@@ -513,8 +513,11 @@ out vec2 uv;
 out float eye;
 void main() {
     // screen pixels (centres at whole numbers in Direct3D) to clip space, top row at the top;
-    // w = 1 / rhw gives perspective-correct interpolation
-    float w = pos.w > 0.0 ? 1.0 / pos.w : 1.0;
+    // w = 1 / rhw gives perspective-correct interpolation. A negative rhw is a corner behind
+    // the camera (the engine's 2D polys in the world, afDraw2dPolyIn3dWorld: x and y projected
+    // by the same depth, so x * w stays a straight line): GL cuts it off at w = 0, where with
+    // w = 1 its far-off x, y stretched the triangle over the picture (the dark stripes)
+    float w = pos.w != 0.0 ? 1.0 / pos.w : 1.0;
     vec2 p = (pos.xy + 0.5) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, pos.z * 2.0 - 1.0, 1.0) * w;
     eye = w;
