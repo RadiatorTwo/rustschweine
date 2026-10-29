@@ -669,10 +669,10 @@ bool passes(float a) {
 // 2D graphics at a higher resolution: the texture's alpha as at the game's resolution, at the
 // centre of the game's pixel (else filtering made a tile's edge next to transparent texels
 // partly transparent, where at the game's resolution it is not: thin gaps); its colour
-// filtered from the texels that are not transparent
-vec4 flat_texel(vec2 at, vec2 centre) {
-    float a = texture(tex, centre).a;
-    if (filtered == 0) return vec4(texture(tex, at).rgb, a);
+// filtered from the texels that are not transparent (`flat_texel`)
+
+// the texels around `at` that are not transparent, filtered: colour times weight, and weight
+vec4 opaque(vec2 at) {
     ivec2 n = textureSize(tex, 0);
     vec2 p = at * vec2(n) - 0.5;
     ivec2 i = ivec2(floor(p));
@@ -684,7 +684,18 @@ vec4 flat_texel(vec2 at, vec2 centre) {
         float w = mix(1.0 - f.x, f.x, float(d.x)) * mix(1.0 - f.y, f.y, float(d.y)) * t.a;
         sum += vec4(t.rgb * w, w);
     }
-    return vec4(sum.a > 0.0 ? sum.rgb / sum.a : texture(tex, at).rgb, a);
+    return sum;
+}
+
+vec4 flat_texel(vec2 at, vec2 centre) {
+    // unfiltered: the texel at the centre, colour and alpha (the texel at `at` may be another,
+    // a transparent one: its colour is the colour key's, magenta edges in the menus)
+    if (filtered == 0) return texture(tex, centre);
+    float a = texture(tex, centre).a;
+    // where all texels around `at` are transparent but the centre's are not: the centre's
+    vec4 sum = opaque(at);
+    if (sum.a == 0.0) sum = opaque(centre);
+    return vec4(sum.a > 0.0 ? sum.rgb / sum.a : vec3(0.0), a);
 }
 
 void main() {
@@ -871,7 +882,7 @@ pub fn show(stamp: u32) {
         r.as_mut().map(|r| {
             r.stamp = stamp;
             r.shown = true;
-            (r.color, (r.width().round() as u32, r.size.1), r.margin.round() as u32)
+            (r.color, (r.width().round() as u32, r.size.1), r.margin)
         })
     });
     if let Some((tex, (w, h), margin)) = shown {
@@ -1013,6 +1024,13 @@ fn rgba(info: &ddraw::Info, bottom_first: bool) -> Vec<u32> {
     out
 }
 
+/// Game coordinate `v` (`m` past the picture's start) as a pixel edge of a framebuffer of
+/// `phys` pixels showing `size` game pixels: multiplied before divided, so a whole result is
+/// exact (as the integer division it replaced).
+fn scaled(v: f32, m: f32, phys: u32, size: f32) -> i32 {
+    ((v + m) as f64 * phys as f64 / size.max(1.0) as f64).floor() as i32
+}
+
 /// A rectangle (x, y, width, height) of a target of `size` in a picture `m` wider on each
 /// side: one over the target's whole width (the viewport, a clear of the picture) reaches over
 /// the margins too, others stay.
@@ -1090,9 +1108,7 @@ impl Render {
 
     /// A game x, y as the framebuffer's pixel edge (y from the top).
     fn edge(&self, x: f32, y: f32) -> (i32, i32) {
-        let sx = self.phys.0 as f64 / self.width().max(1.0) as f64;
-        let sy = self.phys.1 as f64 / self.size.1.max(1) as f64;
-        (((x + self.margin) as f64 * sx).floor() as i32, (y as f64 * sy).floor() as i32)
+        (scaled(x, self.margin, self.phys.0, self.width()), scaled(y, 0.0, self.phys.1, self.size.1 as f32))
     }
 
     /// Bind the framebuffer for `target`: sized for it in a window of `win`, holding its pixels.
@@ -1744,6 +1760,15 @@ fn draw(kind: u32, fvf: u32, verts: u32, n: u32, seq: &[u32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edges() {
+        // as x * phys / size in integers before, where the margin is 0
+        assert_eq!(scaled(480.0, 0.0, 1292, 640.0), 969);
+        assert_eq!(scaled(120.0, 0.0, 656, 640.0), 123);
+        assert_eq!(scaled(480.0, 0.0, 505, 480.0), 505);
+        assert_eq!(scaled(0.0, 106.5, 1706, 853.0), 213);
+    }
 
     #[test]
     fn widened() {
