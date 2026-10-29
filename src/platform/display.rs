@@ -1,12 +1,12 @@
-//! The size missions are drawn at with the Glide renderer: the resolution chosen in
-//! Preferences (our list replaces the game's Display Mode list there, `dialog/extend.rs`),
-//! saved as REG_DWORD `RenderSize` = width << 16 | height in the game's key; 0 or none means
-//! the window's size (fullscreen: the display's). A window gets the chosen size; fullscreen,
-//! the picture is scaled to the display.
+//! The resolution chosen in the launcher (our list replaces the game's Display Mode list there,
+//! `dialog/extend.rs`; the game itself keeps 640x480), saved as REG_DWORD `RenderSize` =
+//! width << 16 | height in the game's key; 0 or none means the window's size (fullscreen: the
+//! display's). A window gets the chosen size; fullscreen, the 3D is drawn at it and the
+//! picture scaled to the display (`draw_size`).
 //!
 //! Fullscreen (borderless, on the window's display) is REG_DWORD `Fullscreen` in the game's
-//! key (default off): our box in Preferences (the game hides its own with Glide) and Alt+Enter
-//! set it; the window starts that way.
+//! key (default off): our "Vollbild" box in the launcher and Alt+Enter set it; the window
+//! starts that way.
 
 use super::{advapi32, window};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -41,9 +41,13 @@ pub fn set_chosen(size: Option<(u32, u32)>) {
     }
 }
 
-/// The size to draw missions at.
-pub fn render_size() -> (u32, u32) {
-    chosen().unwrap_or_else(window::window_size)
+/// The size Direct3D's pictures are made for (their 4:3 part is drawn): the window's;
+/// fullscreen, the chosen resolution if there is one.
+pub fn draw_size() -> (u32, u32) {
+    match chosen() {
+        Some(size) if window::is_fullscreen() => size,
+        _ => window::window_size(),
+    }
 }
 
 /// The saved fullscreen choice.

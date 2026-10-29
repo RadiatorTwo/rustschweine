@@ -9,6 +9,12 @@
 //! pixels. The game draws pre-transformed vertices (XYZRHW, diffuse, specular, one texture)
 //! with the fixed-function pipeline of texture stage 0 (`FS`).
 //!
+//! The framebuffer has the size the picture is shown in the window (`Render::phys`; fullscreen
+//! the resolution chosen in the launcher, `display::draw_size`), the
+//! game's coordinates stay the target's (640x480): vertices go to clip space by the target's
+//! size, the GL viewport and scissor are scaled. DirectDraw's pixels are loaded at their size
+//! and stretched into it (`low`), written back shrunk. `HOGS_LOWRES=1`: the target's size.
+//!
 //! Methods that are not needed yet return D3D_OK or say "unsupported".
 
 use super::{Import, alloc, arg, com_new, ddraw, guest_call, log, mem, new_cstr};
@@ -656,8 +662,15 @@ struct Tex {
 /// The GL side of the device: the render target's framebuffer, and the textures.
 struct Render {
     target: u32,
+    /// the target's size (the game's pixels) and the framebuffer's (`phys`)
     size: (u32, u32),
+    phys: (u32, u32),
+    /// a flip showed the picture: the framebuffer may change its size now
+    shown: bool,
     fbo: glow::Framebuffer,
+    /// the target's pixels at their size, between DirectDraw and the framebuffer
+    low_fbo: glow::Framebuffer,
+    low: glow::Texture,
     color: glow::Texture,
     depth: glow::Renderbuffer,
     /// the stamp of the target's pixels that the colour texture holds
@@ -701,11 +714,12 @@ thread_local! {
 fn with_render<R>(f: impl FnOnce(&mut Render, &State, &glow::Context) -> R) -> Option<R> {
     let target = STATE.with_borrow(|st| st.target);
     let info = ddraw::info(target)?;
+    let win = super::display::draw_size();
     super::window::with_gl(|g| {
         let gl = &g.gl;
         RENDER.with_borrow_mut(|r| {
             let r = r.get_or_insert_with(|| Render::new(gl));
-            r.bind(gl, target, &info);
+            r.bind(gl, target, &info, win);
             STATE.with_borrow(|st| f(r, st, gl))
         })
     })
@@ -751,6 +765,7 @@ pub fn show(stamp: u32) {
     let shown = RENDER.with_borrow_mut(|r| {
         r.as_mut().map(|r| {
             r.stamp = stamp;
+            r.shown = true;
             (r.color, r.size)
         })
     });
@@ -912,10 +927,15 @@ impl Render {
             gl.enable_vertex_attrib_array(3);
             gl.vertex_attrib_pointer_f32(3, 4, glow::UNSIGNED_BYTE, true, stride, 28);
             gl.bind_vertex_array(None);
+            let low = super::gl::texture(gl, false);
             Render {
                 target: 0,
                 size: (0, 0),
+                phys: (0, 0),
+                shown: false,
                 fbo: gl.create_framebuffer().expect("GL framebuffer"),
+                low_fbo: gl.create_framebuffer().expect("GL framebuffer"),
+                low,
                 color: super::gl::texture(gl, false),
                 depth: gl.create_renderbuffer().expect("GL renderbuffer"),
                 stamp: 0,
@@ -934,17 +954,33 @@ impl Render {
         }
     }
 
-    /// Bind the framebuffer for `target`: sized to it, holding its pixels.
-    fn bind(&mut self, gl: &glow::Context, target: u32, info: &ddraw::Info) {
-        if target != self.target || self.size != (info.w, info.h) || self.stamp != info.stamp {
+    /// The framebuffer's size for a target of w x h in a window of `win`: as the window shows
+    /// it, at least the target's.
+    fn phys((w, h): (u32, u32), win: (u32, u32)) -> (u32, u32) {
+        static LOW: OnceLock<bool> = OnceLock::new();
+        let s = super::window::fit(w, h, win.0, win.1).2;
+        if *LOW.get_or_init(|| std::env::var_os("HOGS_LOWRES").is_some()) || s <= 1.0 {
+            return (w, h);
+        }
+        ((w as f64 * s).round() as u32, (h as f64 * s).round() as u32)
+    }
+
+    /// Bind the framebuffer for `target`: sized for it in a window of `win`, holding its pixels.
+    fn bind(&mut self, gl: &glow::Context, target: u32, info: &ddraw::Info, win: (u32, u32)) {
+        let phys = Render::phys((info.w, info.h), win);
+        // a new size only between pictures (or with nothing drawn): the drawing is lost
+        let resize = phys != self.phys && (self.shown || !self.ahead);
+        self.shown = false;
+        if target != self.target || self.size != (info.w, info.h) || self.stamp != info.stamp || resize {
             self.flush_batch(gl);
         }
-        if target != self.target || self.size != (info.w, info.h) {
-            if self.ahead {
+        if target != self.target || self.size != (info.w, info.h) || resize {
+            if self.ahead && !resize {
                 log!("warn: Direct3D: render target changed with drawing not written back");
             }
             self.target = target;
             self.size = (info.w, info.h);
+            self.phys = phys;
             self.stamp = 0;
             self.ahead = false;
             self.applied = None;
@@ -953,8 +989,11 @@ impl Render {
             self.cache = Cache::default();
             unsafe {
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.depth));
-                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, info.w as i32, info.h as i32);
-                super::gl::upload(gl, self.color, &vec![0; (info.w * info.h) as usize], info.w, info.h);
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, phys.0 as i32, phys.1 as i32);
+                super::gl::upload(gl, self.color, &vec![0; (phys.0 * phys.1) as usize], phys.0, phys.1);
+                super::gl::upload(gl, self.low, &vec![0; (info.w * info.h) as usize], info.w, info.h);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.low_fbo));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.low), 0);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.color), 0);
                 gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(self.depth));
@@ -968,7 +1007,7 @@ impl Render {
         if !self.bound {
             unsafe {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-                gl.viewport(0, 0, info.w as i32, info.h as i32);
+                gl.viewport(0, 0, self.phys.0 as i32, self.phys.1 as i32);
             }
             self.bound = true;
         }
@@ -978,7 +1017,8 @@ impl Render {
                 log!("warn: Direct3D: drawing lost to a DirectDraw write");
             }
             // the framebuffer's first row is the bottom of the picture
-            super::gl::upload(gl, self.color, &rgba(info, true), info.w, info.h);
+            super::gl::upload(gl, self.low, &rgba(info, true), info.w, info.h);
+            self.copy(gl, true);
             self.stamp = info.stamp;
             self.ahead = false;
         }
@@ -999,8 +1039,10 @@ impl Render {
         self.flush_batch(gl);
         let (w, h) = (info.w, info.h);
         let mut buf = vec![0u8; (w * h * 4) as usize];
+        self.copy(gl, false);
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.low_fbo));
+            self.bound = false;
             gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut buf)));
         }
         let [_, rm, gm, bm, _] = info.fmt;
@@ -1024,16 +1066,39 @@ impl Render {
         self.ahead = false;
     }
 
-    /// Draw only into a rectangle (x, y, width, height; y down).
+    /// Copy the target's pixels (`low`) into the framebuffer, stretched (`up`), or the
+    /// framebuffer into them, shrunk. The framebuffer is bound afterwards.
+    fn copy(&mut self, gl: &glow::Context, up: bool) {
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let (pw, ph) = (self.phys.0 as i32, self.phys.1 as i32);
+        let (read, draw) = if up { (self.low_fbo, self.fbo) } else { (self.fbo, self.low_fbo) };
+        let ((sw, sh), (dw, dh)) = if up { ((w, h), (pw, ph)) } else { ((pw, ph), (w, h)) };
+        unsafe {
+            // the scissor cuts blits too
+            gl.disable(glow::SCISSOR_TEST);
+            self.cache.scissor = None;
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(draw));
+            let filter = if (sw, sh) == (dw, dh) { glow::NEAREST } else { glow::LINEAR };
+            gl.blit_framebuffer(0, 0, sw, sh, 0, 0, dw, dh, glow::COLOR_BUFFER_BIT, filter);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        }
+    }
+
+    /// Draw only into a rectangle (x, y, width, height; y down; the target's pixels).
     fn scissor(&mut self, gl: &glow::Context, r @ [x, y, w, h]: [u32; 4]) {
         if self.cache.scissor == Some(r) {
             return;
         }
+        // its edges in the framebuffer's pixels
+        let sx = |v: u32| (v as u64 * self.phys.0 as u64 / self.size.0.max(1) as u64) as i32;
+        let sy = |v: u32| (v as u64 * self.phys.1 as u64 / self.size.1.max(1) as u64) as i32;
         unsafe {
             if self.cache.scissor.is_none() {
                 gl.enable(glow::SCISSOR_TEST);
             }
-            gl.scissor(x as i32, self.size.1 as i32 - (y + h) as i32, w as i32, h as i32);
+            let (x0, x1, y0, y1) = (sx(x), sx(x + w), sy(y), sy(y + h));
+            gl.scissor(x0, self.phys.1 as i32 - y1, x1 - x0, y1 - y0);
         }
         self.cache.scissor = Some(r);
     }
@@ -1179,7 +1244,7 @@ impl Render {
         unsafe {
             if !self.bound {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-                gl.viewport(0, 0, self.size.0 as i32, self.size.1 as i32);
+                gl.viewport(0, 0, self.phys.0 as i32, self.phys.1 as i32);
                 self.bound = true;
             }
             if c.program != Some(prog) {

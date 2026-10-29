@@ -87,12 +87,17 @@ How the game starts (`HOGS_TRACE_API=1` shows every import call):
    game folder (`host_path`); the game sets the current folder to D:\.
 4. The launcher, dialog LAUNCHERBOX (device, mode, detail; Start/Ende), shown by our dialog
    overlay (`dialog/`), which opens the window for it. Start writes `launch.bin`. Scripted:
-   `HOGS_INPUT="1500:click@424,338"` (Start, in 640x480 overlay pixels).
+   `HOGS_INPUT="1500:click@424,338"` (Start, in 640x480 overlay pixels). `dialog/extend.rs`
+   puts our settings in: the display's resolutions instead of the game's modes (the game is
+   always given 640x480: it keeps the mode from CBN_SELENDOK, its menus break at others) and
+   a "Vollbild" box; saved as `RenderSize` and `Fullscreen` in the game's key (`display.rs`:
+   a window gets that size, fullscreen is borderless with the 3D drawn at it).
 5. Main window, `_d3d.dll` loaded (`kernel32::load_library`: its DllMain once; GetProcAddress
    from its exports), DirectDraw 7 + Direct3D 7 device (`d3d.rs`: one HAL device drawn with
-   OpenGL into a framebuffer; the back buffer's 555 pixels are loaded into it when DirectDraw
-   wrote them (`ddraw::Surface::stamp`), and written back before DirectDraw touches them
-   (`d3d::flush`)), DirectPlay + lobby by CoCreateInstance (`dplay.rs`), DirectInput 7 (keyboard and
+   OpenGL into a framebuffer of the size the window shows the picture in, the game's
+   coordinates staying 640x480 (`HOGS_LOWRES=1`: 640x480); the back buffer's 555 pixels are
+   stretched into it when DirectDraw wrote them (`ddraw::Surface::stamp`), and written back
+   shrunk before DirectDraw touches them (`d3d::flush`)), DirectPlay + lobby by CoCreateInstance (`dplay.rs`), DirectInput 7 (keyboard and
    mouse by state, `dinput.rs`), DirectSound (`dsound.rs`, ordinal #1), mixer/MCI (none),
    Bink (fails: videos skipped).
 6. Title screen (bitmaps by LoadImageA + StretchBlt onto surfaces: `gdi32.rs`), "Taste

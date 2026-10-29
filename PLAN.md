@@ -183,4 +183,16 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       (`cdaudio.rs`); the game's master slider and fades set it, mixed by `dsound.rs`
 - [ ] Setup must keep the CD image's `.cue` next to the game
 - [ ] Bink videos (`bink.rs`: BinkOpen fails, the game skips them): a Bink 1 decoder
-- [ ] High resolution, widescreen, settings
+- [x] High resolution (2026-10-29, `d3d.rs` `Render::phys`): Direct3D draws into a framebuffer
+      of the size the window shows the 4:3 picture in (a new size after a flip); the game's
+      coordinates stay 640x480 (vertices to clip space by the target's size, viewport and
+      scissor scaled). DirectDraw's pixels go through a 640x480 texture (`low`): stretched in,
+      shrunk out (glBlitFramebuffer). Same speed (~750 a second). `HOGS_LOWRES=1`: as before.
+      The 2D (HUD, text) is still 640x480 pixels, stretched
+- [x] Resolution and fullscreen in the launcher (2026-10-29, `dialog/extend.rs`, `display.rs`):
+      our list of the display's modes (and "Desktop") replaces the game's Display Mode list,
+      a "Vollbild" box below Detail Level (borderless; Alt+Enter still switches). The game is
+      always given 640x480 (with 1024x768 its own menus came out enlarged and cut off, the HUD
+      smaller): its hidden list is set to it and CBN_SELENDOK sent, which is where the game
+      takes the mode from (0x481910), not from the list at Start
+- [ ] Widescreen, a frame rate setting

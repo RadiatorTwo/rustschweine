@@ -1,8 +1,12 @@
 //! The game's dialog boxes (Preferences, controller and audio settings, the pause bar, load and
 //! save, the quit box): its own RT_DIALOG resources, driven by its own dialog procedures, drawn
 //! by us in the game's style as an overlay over its frames.
+//!
+//! `extend` can change a dialog before it is built and add our own controls (ids from
+//! `FIRST_OURS`), which we handle ourselves: the game's procedure never sees them.
 
 pub mod draw;
+pub mod extend;
 pub mod font;
 pub mod template;
 
@@ -75,8 +79,10 @@ pub struct Control {
 #[derive(Clone, Debug)]
 pub struct Dialog {
     pub hwnd: u32,
-    /// the template's resource id (0 for a message box)
+    /// the template's resource id (0 for a message box, or one by name)
     pub template: u32,
+    /// the template's resource name (upper case; empty for one by id)
+    pub name: String,
     proc_: u32,
     pub title: String,
     pub caption: bool,
@@ -200,7 +206,7 @@ fn kind_of(i: &Item, h: i32) -> (Kind, i32) {
 }
 
 impl Dialog {
-    fn new(hwnd: u32, template: u32, proc_: u32, t: &Template) -> Dialog {
+    fn new(hwnd: u32, template: u32, name: String, proc_: u32, t: &Template) -> Dialog {
         let caption = t.style & WS_CAPTION == WS_CAPTION && !t.title.is_empty();
         let cap_h = if caption { 14 } else { 0 };
         // MS Sans Serif 8: 6 x 13 pixel dialog base units; shrink to fit the overlay
@@ -237,6 +243,7 @@ impl Dialog {
         Dialog {
             hwnd,
             template,
+            name,
             proc_,
             title: t.title.clone(),
             caption,
@@ -304,7 +311,11 @@ impl Dialog {
         if self.proc_ == 0 {
             // a message box: any button ends it
             self.result = Some(c.id);
-        } else {
+        } else if !c.ours {
+            // OK (the launcher's Start): our settings first, the game reads its own after
+            if matches!(c.kind, Kind::Push { .. }) && (c.id == 1 || c.text.trim().eq_ignore_ascii_case("ok")) {
+                extend::ok(self);
+            }
             out.push(self.command(k, 0));
         }
     }
@@ -741,8 +752,13 @@ fn run(c: &mut Cpu, mut d: Dialog, param: u32) -> u32 {
     if proc_ != 0 {
         guest_call(c, proc_, &[hwnd, WM_INITDIALOG, first, param]);
     }
-    // the game's launcher comes before its main window
+    // the game's launcher comes before its main window (and ours asks for its display)
     super::window::open("Frontschweine");
+    let mut out = Vec::new();
+    if let Some(d) = stack().dialogs.iter_mut().find(|d| d.hwnd == hwnd) {
+        extend::init(d, &mut out);
+    }
+    deliver(c, out);
     redraw();
     let mut phase = draw::caret_phase();
     loop {
@@ -850,11 +866,13 @@ fn dialog_box_param(c: &mut Cpu) -> u32 {
         log!("warn: DialogBoxParamA: dialog {id:?} not found");
         return ERR;
     };
-    let Some(t) = Template::parse(mem().slice(at, size as usize)) else {
+    let Some(mut t) = Template::parse(mem().slice(at, size as usize)) else {
         log!("warn: DialogBoxParamA: dialog {id:?} cannot be read");
         return ERR;
     };
     let tid = if let ResId::Id(n) = id { n } else { 0 };
+    let name = if let ResId::Name(n) = &id { n.to_ascii_uppercase() } else { String::new() };
+    extend::adjust(&name, &mut t);
     if trace() {
         log!("dialog {id:?} opens");
     }
@@ -863,7 +881,7 @@ fn dialog_box_param(c: &mut Cpu) -> u32 {
         s.serial = s.serial.wrapping_add(1);
         0x00da_0000 | (s.serial & 0xff) << 8
     };
-    run(c, Dialog::new(hwnd, tid, proc_, &t), param)
+    run(c, Dialog::new(hwnd, tid, name, proc_, &t), param)
 }
 
 fn end_dialog(c: &mut Cpu) -> u32 {
@@ -957,7 +975,7 @@ fn message_box(c: &mut Cpu) -> u32 {
         s.serial = s.serial.wrapping_add(1);
         0x00da_0000 | (s.serial & 0xff) << 8
     };
-    run(c, Dialog::new(hwnd, 0, 0, &t), 0)
+    run(c, Dialog::new(hwnd, 0, String::new(), 0, &t), 0)
 }
 
 pub const IMPORTS: &[Import] = &[
