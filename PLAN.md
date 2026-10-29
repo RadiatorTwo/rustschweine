@@ -45,11 +45,10 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
    fine to commit). Then: a comparison tool, names into `data/symbols.txt`.
 
 ### 2. Code
-- [ ] `plausible` in `src/discover.rs` counts `Wait` (fwait) as an instruction compiled code
-      never has, but MSVC code does contain a lone `fwait`: functions found only as numbers
-      that contain one are rejected. Remove `Wait` from the `odd` list (found in rust_metal,
-      2026-10-29: 3 of 21 functions missed there came back); then compare the function count
-      before and after.
+- [x] `plausible` in `src/discover.rs` no longer counts `Wait` (fwait) as an instruction
+      compiled code never has: MSVC code does contain a lone `fwait` (found in rust_metal,
+      2026-10-29: 3 of 21 functions missed there came back). Here no change: 2714 functions,
+      2874 entries before and after (2026-10-29)
 - [ ] `fnsave`/`frstor` in the lifter (DLL's C runtime, error path of a math function)
 - [ ] Differential test against Unicorn (future_rust_cop's `src/bin/difftest.rs`)
 - [ ] Unreached code that turns out to be needed at run time (rt_lookup reports it)

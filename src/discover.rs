@@ -311,7 +311,7 @@ fn plausible(code: &mut Code, t: u32, seen: &(HashSet<u32>, HashSet<u32>)) -> bo
         let odd = matches!(
             i.mnemonic(),
             Aaa | Aad | Aam | Aas | Daa | Das | Arpl | Bound | Lds | Les | Lfs | Lgs | Lss | Into | Int1 | Iretd | Retf | Salc
-                | Insb | Insd | Insw | Outsb | Outsd | Outsw | In | Out | Hlt | Cli | Sti | Enter | Wait
+                | Insb | Insd | Insw | Outsb | Outsd | Outsw | In | Out | Hlt | Cli | Sti | Enter
         ) || i.op_kinds().any(|k| matches!(k, OpKind::FarBranch16 | OpKind::FarBranch32))
             || (i.memory_base() != Register::None && i.memory_base().size() == 2)
             || !matches!(i.segment_prefix(), Register::None | Register::FS);
