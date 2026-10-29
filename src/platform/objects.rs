@@ -30,6 +30,9 @@
 //! - Way 2 (the sky): fog off while it is drawn (and on after it), not tested for visibility,
 //!   the colour grey [0x1002be68] with the object's alpha, depth 0.9.
 //!
+//! Hogs move smoothly between the game's steps (`smooth`): their bones are kept from the last
+//! two steps' pictures and blended in the pictures between (`fps::blend`).
+//!
 //! `HOGS_OBJECTS=engine`: all by the engine (for comparing);
 //! `HOGS_OBJECTS=check`: our vertices compared with the engine's.
 
@@ -40,6 +43,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 pub const DRAW_OBJ: u32 = 0x1000_d440;
+/// Draws a hog: works out its bones, draws it (afDrawObj with bones), then what it holds.
+pub const DRAW_ANIM_MODEL: u32 = 0x1000_da10;
 /// The object's visibility (object, out: 3 shorts, its position by the camera): 0 hidden.
 const VISIBLE: u32 = 0x1001_0610;
 /// Drawn even when hidden (when not 0).
@@ -124,6 +129,7 @@ pub fn draw_obj(c: &mut Cpu) {
         return;
     }
     if bones != 0 {
+        smooth(m.rd32(BONES));
         set(obj + 0x4c, m.rd32(BONES_ALPHA));
         follow(obj);
         draw(obj, bones);
@@ -164,6 +170,101 @@ pub fn draw_obj(c: &mut Cpu) {
     }
     // ret
     c.r[ESP] = esp + 4;
+}
+
+/// The bones a hog has, as the engine keeps them (15 of 12 floats: rows of three, the move).
+type Bones = [[f32; 12]; 15];
+
+/// A hog's bones in the last two steps' pictures, and the number of the last one.
+struct Hog {
+    prev: Bones,
+    cur: Bones,
+    step: u32,
+}
+
+thread_local! {
+    /// by where their bones are (a hog's record + 0x7c)
+    static HOGS: RefCell<HashMap<u32, Hog>> = RefCell::new(HashMap::new());
+    /// bones a step's picture showed from the step before: the step's own put back after it
+    static SHOWN: RefCell<Vec<(u32, Bones)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A hog moves farther than this in a step: a jump, not blended.
+const JUMP: f32 = 1500.0;
+
+/// Blend the hog's bones at `at` (just worked out for this picture) between the last two
+/// steps: a step's own picture shows the step before (as the camera), the pictures after it
+/// move on to this step's. In a step's picture the bones are put back afterwards
+/// (`after_anim_model`); in the pictures between, the transaction undoes them.
+fn smooth(at: u32) {
+    let Some((t, step)) = super::fps::blend() else { return };
+    let cur: Bones = std::array::from_fn(|b| std::array::from_fn(|i| f32_at(at + (b * 12 + i) as u32 * 4)));
+    let extra = super::fps::in_extra();
+    let shown = HOGS.with_borrow_mut(|hogs| {
+        let h = hogs.entry(at).or_insert(Hog { prev: cur, cur, step: step.wrapping_sub(2) });
+        if !extra && h.step != step {
+            // a new step: the last one becomes the one before (when drawn then and near)
+            let near = (9..12).all(|i| (cur[0][i] - h.cur[0][i]).abs() < JUMP);
+            h.prev = if h.step == step.wrapping_sub(1) && near { h.cur } else { cur };
+            h.cur = cur;
+            h.step = step;
+        }
+        (h.step == step).then(|| blend_bones(&h.prev, &h.cur, t))
+    });
+    let Some(shown) = shown else { return };
+    if !extra {
+        SHOWN.with_borrow_mut(|s| s.push((at, cur)));
+    }
+    for (b, mat) in shown.iter().enumerate() {
+        for (i, v) in mat.iter().enumerate() {
+            set(at + (b * 12 + i) as u32 * 4, v.to_bits());
+        }
+    }
+    // forget hogs not drawn for long (a new mission)
+    HOGS.with_borrow_mut(|hogs| {
+        if hogs.len() > 256 {
+            hogs.retain(|_, h| step.wrapping_sub(h.step) < 25);
+        }
+    });
+}
+
+/// Draw a hog; in a step's picture put back the bones it showed from the step before.
+pub fn draw_anim_model(c: &mut Cpu) {
+    call_original(c, DRAW_ANIM_MODEL);
+    SHOWN.with_borrow_mut(|s| {
+        for (at, bones) in s.drain(..) {
+            for (b, mat) in bones.iter().enumerate() {
+                for (i, v) in mat.iter().enumerate() {
+                    set(at + (b * 12 + i) as u32 * 4, v.to_bits());
+                }
+            }
+        }
+    });
+}
+
+/// Between two sets of bones: each matrix element in a straight line, then each row (a turned
+/// and scaled axis) as long as in between (bones turn little in a step; a turn would otherwise
+/// shrink them halfway). The engine's matrices are not pure turns: blending them as quaternions
+/// changed them.
+fn blend_bones(a: &Bones, b: &Bones, t: f32) -> Bones {
+    if t <= 0.0 {
+        return *a;
+    }
+    std::array::from_fn(|k| blend_matrix(&a[k], &b[k], t))
+}
+
+fn blend_matrix(a: &[f32; 12], b: &[f32; 12], t: f32) -> [f32; 12] {
+    let len = |m: &[f32; 12], r: usize| (m[r * 3].powi(2) + m[r * 3 + 1].powi(2) + m[r * 3 + 2].powi(2)).sqrt();
+    let mut out: [f32; 12] = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+    for row in 0..3 {
+        let (want, have) = (len(a, row) + (len(b, row) - len(a, row)) * t, len(&out, row));
+        if have > 0.0 {
+            for c in 0..3 {
+                out[row * 3 + c] *= want / have;
+            }
+        }
+    }
+    out
 }
 
 /// The alpha the object fades to (afDrawObj, 0x1000d4fe...).
@@ -618,6 +719,37 @@ fn draw(obj: u32, bones: u32) {
         static SAID: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if SAID.set(()).is_ok() {
             log!("warn: objects: flat shading is not done by our objects");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A turn about z by `angle`, scaled (rows of three, then the move).
+    fn turned(angle: f32, scale: f32, at: [f32; 3]) -> [f32; 12] {
+        let (s, c) = angle.sin_cos();
+        let r = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        std::array::from_fn(|i| if i < 9 { r[i] * scale } else { at[i - 9] })
+    }
+
+    #[test]
+    fn bones_blend_halfway() {
+        let h = blend_matrix(&turned(0.0, 2.0, [0.0; 3]), &turned(1.0, 2.0, [10.0, 0.0, 4.0]), 0.5);
+        let want = turned(0.5, 2.0, [5.0, 0.0, 2.0]);
+        for i in 0..12 {
+            assert!((h[i] - want[i]).abs() < 1e-5, "{h:?} {want:?}");
+        }
+    }
+
+    #[test]
+    fn bones_blend_ends() {
+        let (a, b) = (turned(0.3, 1.0, [1.0, 2.0, 3.0]), turned(0.6, 1.5, [4.0, 5.0, 6.0]));
+        assert_eq!(blend_bones(&[a; 15], &[b; 15], 0.0)[3], a);
+        let end = blend_matrix(&a, &b, 1.0);
+        for i in 0..12 {
+            assert!((end[i] - b[i]).abs() < 1e-5);
         }
     }
 }

@@ -134,9 +134,26 @@ pub fn render(c: &mut Cpu) {
     let prev = if prev.near(&cur) { prev } else { cur };
     CAMS.set(Some((prev, cur, Instant::now())));
     prev.write();
+    STEPS.set(STEPS.get().wrapping_add(1));
+    BLEND.set(Some(0.0));
     call_original(c, RENDER);
+    BLEND.set(None);
     // the game's camera stays as the step left it (the drawing may have changed it)
     cur.write();
+}
+
+thread_local! {
+    /// While a mission picture is drawn: how far it is from the step before to the last one
+    /// (0 in a step's own picture); and the steps' pictures counted.
+    static BLEND: Cell<Option<f32>> = const { Cell::new(None) };
+    static STEPS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// While a mission picture is drawn: where between the last two steps it shows the game (0:
+/// the step before, a step's own picture; up to 1 in the pictures after it), and the number
+/// of the last step's picture. None when pictures are not drawn between steps.
+pub fn blend() -> Option<(f32, u32)> {
+    BLEND.get().map(|t| (t, STEPS.get()))
 }
 
 pub fn step(c: &mut Cpu) {
@@ -182,9 +199,11 @@ fn extra_picture(c: &mut Cpu) {
     if let Some((prev, cur, at)) = CAMS.get() {
         let t = (at.elapsed().as_secs_f32() / STEP_TIME.as_secs_f32()).min(1.0);
         prev.lerp(&cur, t).write();
+        BLEND.set(Some(t));
     }
     c.r[ECX] = mem().rd32(RENDERER);
     guest_call(c, RENDER, &[]);
+    BLEND.set(None);
     EXTRA.set(false);
     let t2 = Instant::now();
     SHADOW.with_borrow_mut(|s| s.restore());

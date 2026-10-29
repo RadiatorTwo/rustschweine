@@ -129,7 +129,9 @@ The mission's 3D is drawn by our own shaders, not by the engine's CPU code (each
 against the engine's vertices): ground and water (`ground.rs`), objects, trees, the sky and the
 hogs with their bones (`objects.rs`, afDrawObj; models kept in a vertex buffer, the object's
 or bones' matrices as uniforms; `HOGS_OBJECTS=engine|check`, `HOGS_GROUND=engine`; the module
-comments describe the engine's data). `examples/pngdiff.rs` compares two `HOGS_SHOT`s.
+comments describe the engine's data). The hogs' bones are blended between the last two steps
+in the pictures between (`objects.rs` `smooth`, `fps::blend`). `examples/pngdiff.rs` compares
+two `HOGS_SHOT`s.
 Direct3D draws are batched by state (`d3d.rs` `Pipe`); a flip of a Direct3D picture shows the
 GL texture directly (`d3d::show`). x87 under 24 bits to nearest (Direct3D's control word
 0x3f) is computed inline (`lift/x87.rs` `arith`), exact (falls back to `rt_fpu_round` on a

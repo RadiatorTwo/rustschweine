@@ -680,6 +680,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[
     (ground::AFTER_GROUND, ground::after_ground),
     (ground::WATER, ground::water),
     (objects::DRAW_OBJ, objects::draw_obj),
+    (objects::DRAW_ANIM_MODEL, objects::draw_anim_model),
 ];
 
 /// The loaded engine DLL (Data/_d3d.dll): its exports, for GetProcAddress.
