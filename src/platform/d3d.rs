@@ -14,6 +14,9 @@
 //! game's coordinates stay the target's (640x480): vertices go to clip space by the target's
 //! size, the GL viewport and scissor are scaled. DirectDraw's pixels are loaded at their size
 //! and stretched into it (`low`), written back shrunk. `HOGS_LOWRES=1`: the target's size.
+//! Widescreen in missions (`wide.rs`): the framebuffer reaches `margin` game pixels past the
+//! target left and right (the `origin` uniform), a viewport or clear over the whole width
+//! reaches over them too (`widen`), DirectDraw's pixels go between them.
 //!
 //! Methods that are not needed yet return D3D_OK or say "unsupported".
 
@@ -560,6 +563,8 @@ layout(location = 2) in vec4 dif;
 layout(location = 3) in vec4 spe;
 layout(location = 4) in vec4 box;
 uniform vec2 size;
+// the game's x, y at the framebuffer's top left (the margin: widescreen)
+uniform vec2 origin;
 flat out vec4 bounds;
 out vec4 diffuse;
 out vec4 specular;
@@ -575,7 +580,7 @@ void main() {
     // A pixel whose centre is on an edge is the triangle's in Direct3D when the edge is its
     // left or top one; GL's rule differs (y is up there), and such rows between two tiles of
     // 2D graphics stayed empty: so the corners are a little up and left, no centre on an edge
-    vec2 p = (pos.xy + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
+    vec2 p = (pos.xy - origin + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, pos.z * 2.0 - 1.0, 1.0) * w;
     eye = w;
     // ARGB words: their bytes are B G R A
@@ -593,6 +598,7 @@ void main() {
 const FS: &str = r#"
 uniform sampler2D tex;
 uniform vec2 size;
+uniform vec2 origin;
 // the framebuffer's pixels per screen pixel
 uniform vec2 pixel;
 // the texture is filtered (bilinear)
@@ -684,7 +690,7 @@ vec4 flat_texel(vec2 at, vec2 centre) {
 void main() {
     // the texture where this pixel is in the screen's pixels (centres at whole numbers), but
     // within `bounds` (y is up here)
-    vec2 g = vec2(gl_FragCoord.x, size.y * pixel.y - gl_FragCoord.y) / pixel - 0.5 + 1.0 / 64.0;
+    vec2 g = vec2(gl_FragCoord.x, size.y * pixel.y - gl_FragCoord.y) / pixel + origin - 0.5 + 1.0 / 64.0;
     vec2 lo = bounds.xy;
     vec2 hi = max(bounds.zw, lo);
     vec2 ux = pixel.x * dFdx(uv);
@@ -710,6 +716,7 @@ void main() {
 #[derive(Clone, Copy)]
 struct Uniforms {
     size: Option<glow::UniformLocation>,
+    origin: Option<glow::UniformLocation>,
     pixel: Option<glow::UniformLocation>,
     filtered: Option<glow::UniformLocation>,
     tex: Option<glow::UniformLocation>,
@@ -730,6 +737,7 @@ impl Uniforms {
         let l = |n: &str| unsafe { gl.get_uniform_location(prog, n) };
         Uniforms {
             size: l("size"),
+            origin: l("origin"),
             pixel: l("pixel"),
             filtered: l("filtered"),
             tex: l("tex"),
@@ -759,6 +767,9 @@ struct Render {
     /// the target's size (the game's pixels) and the framebuffer's (`phys`)
     size: (u32, u32),
     phys: (u32, u32),
+    /// game pixels the framebuffer reaches past the target left and right (widescreen in
+    /// missions, `wide.rs`; 0 otherwise): it shows x from -margin to width + margin
+    margin: f32,
     /// a flip showed the picture: the framebuffer may change its size now
     shown: bool,
     fbo: glow::Framebuffer,
@@ -860,11 +871,11 @@ pub fn show(stamp: u32) {
         r.as_mut().map(|r| {
             r.stamp = stamp;
             r.shown = true;
-            (r.color, r.size)
+            (r.color, (r.width().round() as u32, r.size.1), r.margin.round() as u32)
         })
     });
-    if let Some((tex, (w, h))) = shown {
-        super::window::show_texture(tex, w, h, 1.0);
+    if let Some((tex, (w, h), margin)) = shown {
+        super::window::show_texture(tex, w, h, margin, 1.0);
     }
 }
 
@@ -1002,6 +1013,16 @@ fn rgba(info: &ddraw::Info, bottom_first: bool) -> Vec<u32> {
     out
 }
 
+/// A rectangle (x, y, width, height) of a target of `size` in a picture `m` wider on each
+/// side: one over the target's whole width (the viewport, a clear of the picture) reaches over
+/// the margins too, others stay.
+fn widen(r @ [x, y, w, h]: [u32; 4], size: (u32, u32), m: f32) -> [f32; 4] {
+    if x == 0 && w == size.0 {
+        return [-m, y as f32, w as f32 + 2.0 * m, h as f32];
+    }
+    r.map(|v| v as f32)
+}
+
 impl Render {
     fn new(gl: &glow::Context) -> Render {
         let prog = super::gl::compile(gl, VS, FS);
@@ -1028,6 +1049,7 @@ impl Render {
                 target: 0,
                 size: (0, 0),
                 phys: (0, 0),
+                margin: 0.0,
                 shown: false,
                 fbo: gl.create_framebuffer().expect("GL framebuffer"),
                 low_fbo: gl.create_framebuffer().expect("GL framebuffer"),
@@ -1061,11 +1083,24 @@ impl Render {
         ((w as f64 * s).round() as u32, (h as f64 * s).round() as u32)
     }
 
+    /// The game's width the framebuffer shows (the target's and the margins).
+    fn width(&self) -> f32 {
+        self.size.0 as f32 + 2.0 * self.margin
+    }
+
+    /// A game x, y as the framebuffer's pixel edge (y from the top).
+    fn edge(&self, x: f32, y: f32) -> (i32, i32) {
+        let sx = self.phys.0 as f64 / self.width().max(1.0) as f64;
+        let sy = self.phys.1 as f64 / self.size.1.max(1) as f64;
+        (((x + self.margin) as f64 * sx).floor() as i32, (y as f64 * sy).floor() as i32)
+    }
+
     /// Bind the framebuffer for `target`: sized for it in a window of `win`, holding its pixels.
     fn bind(&mut self, gl: &glow::Context, target: u32, info: &ddraw::Info, win: (u32, u32)) {
-        let phys = Render::phys((info.w, info.h), win);
+        let margin = super::wide::margin();
+        let phys = Render::phys(((info.w as f32 + 2.0 * margin).round() as u32, info.h), win);
         // a new size only between pictures (or with nothing drawn): the drawing is lost
-        let resize = phys != self.phys && (self.shown || !self.ahead);
+        let resize = (phys != self.phys || margin != self.margin) && (self.shown || !self.ahead);
         self.shown = false;
         if target != self.target || self.size != (info.w, info.h) || self.stamp != info.stamp || resize {
             self.flush_batch(gl);
@@ -1077,6 +1112,7 @@ impl Render {
             self.target = target;
             self.size = (info.w, info.h);
             self.phys = phys;
+            self.margin = margin;
             self.stamp = 0;
             self.ahead = false;
             self.applied = None;
@@ -1163,37 +1199,40 @@ impl Render {
     }
 
     /// Copy the target's pixels (`low`) into the framebuffer, stretched (`up`), or the
-    /// framebuffer into them, shrunk. The framebuffer is bound afterwards.
+    /// framebuffer into them, shrunk (between the margins). The framebuffer is bound afterwards.
     fn copy(&mut self, gl: &glow::Context, up: bool) {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
-        let (pw, ph) = (self.phys.0 as i32, self.phys.1 as i32);
+        let (x0, x1) = (self.edge(0.0, 0.0).0, self.edge(w as f32, 0.0).0);
+        let ph = self.phys.1 as i32;
         let (read, draw) = if up { (self.low_fbo, self.fbo) } else { (self.fbo, self.low_fbo) };
-        let ((sw, sh), (dw, dh)) = if up { ((w, h), (pw, ph)) } else { ((pw, ph), (w, h)) };
+        let (src, dst) = if up { ([0, 0, w, h], [x0, 0, x1, ph]) } else { ([x0, 0, x1, ph], [0, 0, w, h]) };
         unsafe {
             // the scissor cuts blits too
             gl.disable(glow::SCISSOR_TEST);
             self.cache.scissor = None;
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(draw));
-            let filter = if (sw, sh) == (dw, dh) { glow::NEAREST } else { glow::LINEAR };
-            gl.blit_framebuffer(0, 0, sw, sh, 0, 0, dw, dh, glow::COLOR_BUFFER_BIT, filter);
+            let [s0, s1, s2, s3] = src;
+            let [d0, d1, d2, d3] = dst;
+            let filter = if (s2 - s0, s3) == (d2 - d0, d3) { glow::NEAREST } else { glow::LINEAR };
+            gl.blit_framebuffer(s0, s1, s2, s3, d0, d1, d2, d3, glow::COLOR_BUFFER_BIT, filter);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
         }
     }
 
-    /// Draw only into a rectangle (x, y, width, height; y down; the target's pixels).
-    fn scissor(&mut self, gl: &glow::Context, r @ [x, y, w, h]: [u32; 4]) {
+    /// Draw only into a rectangle (x, y, width, height; y down; the target's pixels; one over
+    /// the whole width reaches over the margins too).
+    fn scissor(&mut self, gl: &glow::Context, r: [u32; 4]) {
         if self.cache.scissor == Some(r) {
             return;
         }
+        let [x, y, w, h] = widen(r, self.size, self.margin);
         // its edges in the framebuffer's pixels
-        let sx = |v: u32| (v as u64 * self.phys.0 as u64 / self.size.0.max(1) as u64) as i32;
-        let sy = |v: u32| (v as u64 * self.phys.1 as u64 / self.size.1.max(1) as u64) as i32;
+        let ((x0, y0), (x1, y1)) = (self.edge(x, y), self.edge(x + w, y + h));
         unsafe {
             if self.cache.scissor.is_none() {
                 gl.enable(glow::SCISSOR_TEST);
             }
-            let (x0, x1, y0, y1) = (sx(x), sx(x + w), sy(y), sy(y + h));
             gl.scissor(x0, self.phys.1 as i32 - y1, x1 - x0, y1 - y0);
         }
         self.cache.scissor = Some(r);
@@ -1336,6 +1375,7 @@ impl Render {
             return;
         }
         self.applied = Some((prog, *pipe));
+        let width = self.width();
         let c = &mut self.cache;
         let (rs, ts, tex) = (&pipe.rs, &pipe.ts, pipe.tex);
         unsafe {
@@ -1378,8 +1418,9 @@ impl Render {
             };
             let fc = argb(rs[RS_FOGCOLOR]);
             let want = FsUniforms {
-                size: [self.size.0 as f32, self.size.1 as f32],
-                pixel: [self.phys.0 as f32 / self.size.0.max(1) as f32, self.phys.1 as f32 / self.size.1.max(1) as f32],
+                size: [width, self.size.1 as f32],
+                origin: [-self.margin, 0.0],
+                pixel: [self.phys.0 as f32 / width.max(1.0), self.phys.1 as f32 / self.size.1.max(1) as f32],
                 filtered: (ts[TSS_MAGFILTER] >= 2) as i32,
                 textured: tex.is_some() as i32,
                 color_op: [ts[TSS_COLOROP] as i32, ts[TSS_COLORARG1] as i32, ts[TSS_COLORARG2] as i32],
@@ -1401,6 +1442,9 @@ impl Render {
             }
             if have.filtered != want.filtered {
                 gl.uniform_1_i32(u.filtered.as_ref(), want.filtered);
+            }
+            if have.origin != want.origin {
+                gl.uniform_2_f32(u.origin.as_ref(), want.origin[0], want.origin[1]);
             }
             if have.pixel != want.pixel {
                 gl.uniform_2_f32(u.pixel.as_ref(), want.pixel[0], want.pixel[1]);
@@ -1519,6 +1563,7 @@ struct Cache {
 #[derive(Clone, Copy, PartialEq)]
 struct FsUniforms {
     size: [f32; 2],
+    origin: [f32; 2],
     pixel: [f32; 2],
     filtered: i32,
     textured: i32,
@@ -1538,6 +1583,7 @@ impl FsUniforms {
     fn unknown() -> FsUniforms {
         FsUniforms {
             size: [-1.0; 2],
+            origin: [-1.0; 2],
             pixel: [-1.0; 2],
             filtered: -1,
             textured: -1,
@@ -1695,3 +1741,16 @@ fn draw(kind: u32, fvf: u32, verts: u32, n: u32, seq: &[u32]) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widened() {
+        // a rectangle over the whole width reaches the wide picture's edges, others stay
+        assert_eq!(widen([0, 0, 640, 480], (640, 480), 100.0), [-100.0, 0.0, 840.0, 480.0]);
+        assert_eq!(widen([0, 60, 640, 300], (640, 480), 100.0), [-100.0, 60.0, 840.0, 300.0]);
+        assert_eq!(widen([10, 0, 100, 50], (640, 480), 100.0), [10.0, 0.0, 100.0, 50.0]);
+        assert_eq!(widen([0, 0, 640, 480], (640, 480), 0.0), [0.0, 0.0, 640.0, 480.0]);
+    }
+}

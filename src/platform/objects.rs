@@ -448,6 +448,7 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 tc;
 layout(location = 3) in float bone;
 uniform vec2 size;
+uniform vec2 origin;
 // the object's and camera's matrices as one (columns of the engine's rows, and the move); with
 // bones 32 of them, picked by the vertex's bone
 uniform vec3 view[128];
@@ -479,7 +480,7 @@ void main() {
     float depth = how.y == 1.0 ? 0.0 : how.y == 2.0 ? 0.9 : z * 2e-6;
     float w = z / 8.0;
     // pixel centres at whole numbers, a little up and left (see the device's vertex shader)
-    vec2 p = (s + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
+    vec2 p = (s - origin + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, depth * 2.0 - 1.0, 1.0) * w;
     eye = w;
     // the light (0x10011600): ambient, the direction's part when facing it, at most 2031616,

@@ -287,14 +287,16 @@ pub fn with_gl<R>(f: impl FnOnce(&mut Gl) -> R) -> Option<R> {
     with_host(|h| h.app.gl.as_mut().map(f))
 }
 
-/// Show a texture something rendered (first row at the bottom), w x h, with a gamma.
-pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
+/// Show a texture something rendered (first row at the bottom), w x h, with a gamma; `margin`
+/// pixels left and right of it are past the game's screen (widescreen).
+pub fn show_texture(tex: glow::Texture, w: u32, h: u32, margin: u32, gamma: f32) {
     if !on_main() {
         return;
     }
     with_host(|host| {
         if let Some(gl) = &mut host.app.gl {
             gl.shown = (tex, w, h, false, gamma);
+            gl.margin = margin;
             host.app.draw();
         }
     });
@@ -408,7 +410,7 @@ pub fn frame_size() -> (u32, u32) {
     if !on_main() {
         return (640, 480);
     }
-    with_host(|h| h.app.gl.as_ref().map_or((640, 480), |g| (g.shown.1, g.shown.2)))
+    with_host(|h| h.app.gl.as_ref().map_or((640, 480), |g| (g.shown.1 - 2 * g.margin, g.shown.2)))
 }
 
 /// The window's drawable size in pixels (1280x960 before it exists).
@@ -560,9 +562,9 @@ impl App {
     fn frame_pos(&self) -> (i32, i32) {
         let Some(win) = &self.window else { return (0, 0) };
         let size = win.inner_size();
-        let (w, h) = self.gl.as_ref().map_or((640, 480), |g| (g.shown.1, g.shown.2));
+        let (w, h, m) = self.gl.as_ref().map_or((640, 480, 0), |g| (g.shown.1, g.shown.2, g.margin));
         let (ox, oy, s) = fit(w, h, size.width.max(1), size.height.max(1));
-        let x = ((self.cursor.x - ox) / s).clamp(0.0, w as f64 - 1.0);
+        let x = ((self.cursor.x - ox) / s - m as f64).clamp(0.0, (w - 2 * m) as f64 - 1.0);
         let y = ((self.cursor.y - oy) / s).clamp(0.0, h as f64 - 1.0);
         (x as i32, y as i32)
     }

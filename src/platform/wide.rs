@@ -11,13 +11,15 @@
 
 use super::{display, mem};
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 /// The engine's focal length (float) and horizontal culling factor (float).
 const FOCAL: u32 = 0x1013_1b1c;
 const CULL_X: u32 = 0x1013_e6b4;
 
 thread_local! {
-    static MARGIN: Cell<f32> = const { Cell::new(0.0) };
+    /// The last mission picture's margin, and when it was drawn.
+    static MARGIN: Cell<(f32, Option<Instant>)> = const { Cell::new((0.0, None)) };
 }
 
 /// The game pixels the picture reaches past the 640x480 screen on each side for a picture of
@@ -29,9 +31,14 @@ pub fn margin_for(w: u32, h: u32) -> f32 {
     (480.0 * w as f32 / h as f32 - 640.0).max(0.0) / 2.0
 }
 
-/// The margin of the mission picture being drawn (0 otherwise, or with widescreen off).
+/// The margin of mission pictures (0 with widescreen off, and when no mission picture was drawn
+/// for half a second: a menu, the results). It stays between them, so what is drawn before or
+/// after the engine's drawing (the same picture) is drawn in the same wide framebuffer.
 pub fn margin() -> f32 {
-    MARGIN.get()
+    match MARGIN.get() {
+        (m, Some(t)) if t.elapsed() < Duration::from_millis(500) => m,
+        _ => 0.0,
+    }
 }
 
 /// Draw a mission picture (`f`) widened by the margin, the engine's values put back after.
@@ -42,6 +49,7 @@ pub fn around(f: impl FnOnce()) {
     } else {
         0.0
     };
+    MARGIN.set((m, Some(Instant::now())));
     if m == 0.0 {
         return f();
     }
@@ -51,9 +59,7 @@ pub fn around(f: impl FnOnce()) {
     if cull.to_bits() != old {
         mm.wr32(CULL_X, cull.to_bits());
     }
-    MARGIN.set(m);
     f();
-    MARGIN.set(0.0);
     if mm.rd32(CULL_X) != old {
         mm.wr32(CULL_X, old);
     }

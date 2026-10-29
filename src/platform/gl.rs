@@ -31,6 +31,9 @@ pub struct Gl {
     /// what is shown: a texture, its size, whether its pixels are 0RGB/ARGB words (2D frames:
     /// the bytes are B G R A), and the gamma to show it with
     pub shown: (glow::Texture, u32, u32, bool, f32),
+    /// its pixels left and right of the game's screen (widescreen in missions): input
+    /// positions are in the screen's pixels between them
+    pub margin: u32,
 }
 
 pub fn compile(gl: &glow::Context, vs: &str, fs: &str) -> glow::Program {
@@ -145,7 +148,7 @@ impl Gl {
         upload(&gl, frame, &vec![0; 640 * 480], 640, 480);
         let overlay = texture(&gl, true);
         let video = texture(&gl, true);
-        let g = Gl { gl, surface, context, blit, vao, frame, overlay, has_overlay: false, video, video_rect: None, shown: (frame, 640, 480, true, 1.0) };
+        let g = Gl { gl, surface, context, blit, vao, frame, overlay, has_overlay: false, video, video_rect: None, shown: (frame, 640, 480, true, 1.0), margin: 0 };
         (win, g)
     }
 
@@ -153,6 +156,7 @@ impl Gl {
     pub fn frame(&mut self, px: &[u32], w: u32, h: u32) {
         upload(&self.gl, self.frame, px, w, h);
         self.shown = (self.frame, w, h, true, 1.0);
+        self.margin = 0;
     }
 
     pub fn overlay(&mut self, o: Option<(&[u32], u32, u32)>) {

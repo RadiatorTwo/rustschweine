@@ -146,6 +146,7 @@ layout(location = 0) in vec3 pos;
 layout(location = 1) in vec2 tc;
 layout(location = 2) in vec4 dif;
 uniform vec2 size;
+uniform vec2 origin;
 uniform vec3 cam;
 uniform vec3 rot[3];
 uniform vec2 centre;
@@ -168,7 +169,7 @@ void main() {
     // as the device's vertices: rhw = 8 inv, pixel centres at whole numbers (and a little up
     // and left: see the device's vertex shader)
     float w = 1.0 / (8.0 * inv);
-    vec2 p = (s + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
+    vec2 p = (s - origin + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, z * 2.0 - 1.0, 1.0) * w;
     eye = w;
     diffuse = dif.bgra;
