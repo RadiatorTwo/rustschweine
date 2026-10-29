@@ -9,7 +9,8 @@
 //! makes way for ours, the display's resolutions (`display.rs`); the game keeps 640x480 (we
 //! draw the 3D at the window's size anyway, and its menus are made for 640x480). A
 //! "Vollbild" box goes below Detail Level, a "Breitbild" box (missions' 3D as wide as the
-//! window, `wide.rs`) beside it.
+//! window, `wide.rs`) beside it, below them an "Antialiasing" list (antialiasing,
+//! `display::msaa`).
 
 use super::template::{Class, Item, Template};
 use super::{Dialog, FIRST_OURS, Kind, Notify};
@@ -28,6 +29,10 @@ const CBN_SELENDOK: u32 = 9;
 const RESOLUTION: u32 = FIRST_OURS;
 const FULLSCREEN: u32 = FIRST_OURS + 1;
 const WIDESCREEN: u32 = FIRST_OURS + 2;
+const MSAA: u32 = FIRST_OURS + 3;
+const MSAA_LABEL: u32 = FIRST_OURS + 4;
+/// The antialiasing choices: samples per pixel (more than the graphics card has: its most).
+const SAMPLES: [(&str, u32); 4] = [("Aus", 0), ("2x", 2), ("4x", 4), ("8x", 8)];
 
 const VISIBLE: u32 = 0x1000_0000;
 const TABSTOP: u32 = 0x0001_0000;
@@ -48,6 +53,10 @@ pub fn adjust(name: &str, t: &mut Template) {
     let (y, half) = (detail[1] + 23, detail[2] / 2);
     t.items.push(Item { class: Class::Button, id: FULLSCREEN, text: "Vollbild".into(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0], y, half, 10] });
     t.items.push(Item { class: Class::Button, id: WIDESCREEN, text: "Breitbild".into(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0] + half, y, detail[2] - half, 10] });
+    // a label and a drop-down list below them
+    let y = y + 13;
+    t.items.push(Item { class: Class::Static, id: MSAA_LABEL, text: "Antialiasing".into(), style: VISIBLE, ex_style: 0, rect: [detail[0], y + 2, half, 10] });
+    t.items.push(Item { class: Class::ComboBox, id: MSAA, text: String::new(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0] + half, y, detail[2] - half, detail[3]] });
 }
 
 pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
@@ -85,6 +94,13 @@ pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
     if let Some(c) = d.control(WIDESCREEN) {
         c.check = wide as u32;
     }
+    let samples = display::msaa_saved();
+    if let Some(c) = d.control(MSAA) {
+        if let Kind::Combo { items, sel, .. } = &mut c.kind {
+            items.extend(SAMPLES.iter().map(|&(t, n)| (t.to_string(), n)));
+            *sel = SAMPLES.iter().rposition(|&(_, n)| n <= samples).unwrap_or(0) as i32;
+        }
+    }
 }
 
 pub fn ok(d: &mut Dialog) {
@@ -100,6 +116,13 @@ pub fn ok(d: &mut Dialog) {
     }
     if let Some(on) = d.control(WIDESCREEN).map(|c| c.check != 0) {
         display::set_widescreen(on);
+    }
+    let samples = d.control(MSAA).and_then(|c| match &c.kind {
+        Kind::Combo { items, sel, .. } => items.get(*sel as usize).map(|i| i.1),
+        _ => None,
+    });
+    if let Some(n) = samples {
+        display::set_msaa(n);
     }
     if let Some(v) = size {
         display::set_chosen((v != 0).then_some((v >> 16, v & 0xffff)));

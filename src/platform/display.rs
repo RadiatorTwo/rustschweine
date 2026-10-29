@@ -97,3 +97,33 @@ pub fn set_widescreen(on: bool) {
     advapi32::set_value("", "Widescreen", 4, &(on as u32).to_le_bytes());
     WIDE.store(2, Ordering::Relaxed);
 }
+
+/// Antialiasing (`d3d.rs`: Direct3D's framebuffer multisampled) is REG_DWORD `Antialiasing`
+/// in the game's key, the samples per pixel (0: off, default): our "Antialiasing" list in
+/// the launcher; `HOGS_MSAA=<samples>` overrides it. u32::MAX until read.
+static MSAA: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The samples per pixel chosen (0 or 1: none).
+pub fn msaa() -> u32 {
+    let v = MSAA.load(Ordering::Relaxed);
+    if v != u32::MAX {
+        return v;
+    }
+    let v = match std::env::var("HOGS_MSAA").ok().and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => msaa_saved(),
+    };
+    MSAA.store(v, Ordering::Relaxed);
+    v
+}
+
+/// The saved antialiasing choice (the launcher's list shows it, not `HOGS_MSAA`).
+pub fn msaa_saved() -> u32 {
+    advapi32::value("", "Antialiasing").and_then(|(_, d)| Some(u32::from_le_bytes(d.get(..4)?.try_into().ok()?))).unwrap_or(0)
+}
+
+/// Preferences' OK: saved (`HOGS_MSAA` still overrides it).
+pub fn set_msaa(samples: u32) {
+    advapi32::set_value("", "Antialiasing", 4, &samples.to_le_bytes());
+    MSAA.store(u32::MAX, Ordering::Relaxed);
+}

@@ -17,6 +17,8 @@
 //! Widescreen in missions (`wide.rs`): the framebuffer reaches `margin` game pixels past the
 //! target left and right (the `origin` uniform), a viewport or clear over the whole width
 //! reaches over them too (`widen`), DirectDraw's pixels go between them.
+//! Antialiasing (`display::msaa`): the framebuffer is multisampled, resolved into the colour
+//! texture before a flip shows it and before it is written back (`resolve`).
 //!
 //! Methods that are not needed yet return D3D_OK or say "unsupported".
 
@@ -787,8 +789,14 @@ struct Render {
     /// the target's pixels at their size, between DirectDraw and the framebuffer
     low_fbo: glow::Framebuffer,
     low: glow::Texture,
+    /// the picture at the framebuffer's size; antialiased, the framebuffer draws into
+    /// multisampled `ms_color` and the picture is resolved into this (`resolve_fbo`) before
+    /// it is shown or written back
     color: glow::Texture,
     depth: glow::Renderbuffer,
+    samples: u32,
+    ms_color: glow::Renderbuffer,
+    resolve_fbo: glow::Framebuffer,
     /// the stamp of the target's pixels that the colour texture holds
     stamp: u32,
     /// drawn into since the pixels were last written
@@ -878,6 +886,7 @@ pub fn ahead(surface: u32) -> bool {
 /// stamp and keeps its colour (Direct3D's pictures cover all of it; the pixels get the
 /// picture written when DirectDraw touches them).
 pub fn show(stamp: u32) {
+    super::window::with_gl(|g| RENDER.with_borrow_mut(|r| r.as_mut().map(|r| r.resolve(&g.gl))));
     let shown = RENDER.with_borrow_mut(|r| {
         r.as_mut().map(|r| {
             r.stamp = stamp;
@@ -1074,6 +1083,9 @@ impl Render {
                 low,
                 color: super::gl::texture(gl, false),
                 depth: gl.create_renderbuffer().expect("GL renderbuffer"),
+                samples: 0,
+                ms_color: gl.create_renderbuffer().expect("GL renderbuffer"),
+                resolve_fbo: gl.create_framebuffer().expect("GL framebuffer"),
                 stamp: 0,
                 ahead: false,
                 prog,
@@ -1101,6 +1113,15 @@ impl Render {
         ((w as f64 * s).round() as u32, (h as f64 * s).round() as u32)
     }
 
+    /// The samples per pixel of the framebuffer (`display::msaa`, at most what GL has; 0: not
+    /// multisampled).
+    fn samples(gl: &glow::Context) -> u32 {
+        static MAX: OnceLock<u32> = OnceLock::new();
+        let max = *MAX.get_or_init(|| unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) }.max(0) as u32);
+        let n = super::display::msaa().min(max);
+        if n > 1 { 1 << n.ilog2() } else { 0 }
+    }
+
     /// The game's width the framebuffer shows (the target's and the margins).
     fn width(&self) -> f32 {
         self.size.0 as f32 + 2.0 * self.margin
@@ -1116,7 +1137,8 @@ impl Render {
         let margin = super::wide::margin();
         let phys = Render::phys(((info.w as f32 + 2.0 * margin).round() as u32, info.h), win);
         // a new size only between pictures (or with nothing drawn): the drawing is lost
-        let resize = (phys != self.phys || margin != self.margin) && (self.shown || !self.ahead);
+        let samples = Render::samples(gl);
+        let resize = (phys != self.phys || margin != self.margin || samples != self.samples) && (self.shown || !self.ahead);
         self.shown = false;
         if target != self.target || self.size != (info.w, info.h) || self.stamp != info.stamp || resize {
             self.flush_batch(gl);
@@ -1129,6 +1151,7 @@ impl Render {
             self.size = (info.w, info.h);
             self.phys = phys;
             self.margin = margin;
+            self.samples = samples;
             self.stamp = 0;
             self.ahead = false;
             self.applied = None;
@@ -1136,14 +1159,27 @@ impl Render {
             // the scissor and depth mask set below
             self.cache = Cache::default();
             unsafe {
+                let (pw, ph) = (phys.0 as i32, phys.1 as i32);
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.depth));
-                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, phys.0 as i32, phys.1 as i32);
+                if samples > 1 {
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples as i32, glow::DEPTH_COMPONENT24, pw, ph);
+                    gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.ms_color));
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples as i32, glow::RGBA8, pw, ph);
+                } else {
+                    gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, pw, ph);
+                }
                 super::gl::upload(gl, self.color, &vec![0; (phys.0 * phys.1) as usize], phys.0, phys.1);
                 super::gl::upload(gl, self.low, &vec![0; (info.w * info.h) as usize], info.w, info.h);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.low_fbo));
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.low), 0);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.resolve_fbo));
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.color), 0);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+                if samples > 1 {
+                    gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(self.ms_color));
+                } else {
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.color), 0);
+                }
                 gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(self.depth));
                 gl.disable(glow::SCISSOR_TEST);
                 gl.depth_mask(true);
@@ -1216,12 +1252,19 @@ impl Render {
 
     /// Copy the target's pixels (`low`) into the framebuffer, stretched (`up`), or the
     /// framebuffer into them, shrunk (between the margins). The framebuffer is bound afterwards.
+    /// Multisampled, the framebuffer can be blitted only at its size: the copy goes through
+    /// the colour texture.
     fn copy(&mut self, gl: &glow::Context, up: bool) {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let (x0, x1) = (self.edge(0.0, 0.0).0, self.edge(w as f32, 0.0).0);
         let ph = self.phys.1 as i32;
-        let (read, draw) = if up { (self.low_fbo, self.fbo) } else { (self.fbo, self.low_fbo) };
+        let ms = self.samples > 1;
+        let big = if ms { self.resolve_fbo } else { self.fbo };
+        let (read, draw) = if up { (self.low_fbo, big) } else { (big, self.low_fbo) };
         let (src, dst) = if up { ([0, 0, w, h], [x0, 0, x1, ph]) } else { ([x0, 0, x1, ph], [0, 0, w, h]) };
+        if ms && !up {
+            self.resolve(gl);
+        }
         unsafe {
             // the scissor cuts blits too
             gl.disable(glow::SCISSOR_TEST);
@@ -1232,6 +1275,31 @@ impl Render {
             let [d0, d1, d2, d3] = dst;
             let filter = if (s2 - s0, s3) == (d2 - d0, d3) { glow::NEAREST } else { glow::LINEAR };
             gl.blit_framebuffer(s0, s1, s2, s3, d0, d1, d2, d3, glow::COLOR_BUFFER_BIT, filter);
+            if ms && up {
+                // every sample of a pixel gets its colour
+                let (pw, ph) = (self.phys.0 as i32, self.phys.1 as i32);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.resolve_fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
+                gl.blit_framebuffer(0, 0, pw, ph, 0, 0, pw, ph, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        }
+    }
+
+    /// Multisampled: average each pixel's samples into the colour texture. The framebuffer
+    /// is bound afterwards.
+    fn resolve(&mut self, gl: &glow::Context) {
+        if self.samples <= 1 {
+            return;
+        }
+        self.flush_batch(gl);
+        let (pw, ph) = (self.phys.0 as i32, self.phys.1 as i32);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            self.cache.scissor = None;
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.resolve_fbo));
+            gl.blit_framebuffer(0, 0, pw, ph, 0, 0, pw, ph, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
         }
     }
