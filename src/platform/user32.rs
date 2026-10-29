@@ -149,14 +149,26 @@ fn poll(wait: Duration) {
     while let Some(i) = window::next_input() {
         let m = |msg, wp, lp| Msg { hwnd, msg, wp, lp };
         match i {
-            Input::Key { vk, scan, down, repeat } => {
-                let k = &mut s.keys[vk as usize];
-                if down {
-                    *k = if *k & 0x80 == 0 { 0x81 } else { *k | 0x80 };
+            Input::Key { vk, scan, ext, down, repeat } => {
+                let press = |k: &mut u8| {
+                    if down {
+                        *k = if *k & 0x80 == 0 { 0x81 } else { *k | 0x80 };
+                    } else {
+                        *k &= !0x80;
+                    }
+                };
+                // Shift, Ctrl and Alt: also their left or right half (VK_LSHIFT 0xa0 ...
+                // VK_RMENU 0xa5); the key itself is down while either half is
+                if let Some(left) = [0x10, 0x11, 0x12].iter().position(|&v| v == vk).map(|i| 0xa0 + 2 * i) {
+                    let right = if vk == 0x10 { scan == 0x36 } else { ext };
+                    press(&mut s.keys[left + right as usize]);
+                    let held = (s.keys[left] | s.keys[left + 1]) & 0x80;
+                    let k = &mut s.keys[vk as usize];
+                    *k = if held != 0 && *k & 0x80 == 0 { 0x81 } else { *k & !0x80 | held };
                 } else {
-                    *k &= !0x80;
+                    press(&mut s.keys[vk as usize]);
                 }
-                let lp = 1 | (scan as u32) << 16 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
+                let lp = 1 | (scan as u32) << 16 | (ext as u32) << 24 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
                 let sys = vk == 0x12 || key_alt(&s.keys) && vk != 0x12;
                 let msg = match (down, sys) {
                     (true, false) => WM_KEYDOWN,

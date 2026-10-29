@@ -19,7 +19,8 @@ use winit::window::{Window, WindowId};
 /// Input for the game, in game terms: Windows virtual-key codes and frame pixels.
 #[derive(Clone, Copy, Debug)]
 pub enum Input {
-    Key { vk: u8, scan: u8, down: bool, repeat: bool },
+    /// `ext`: an extended key (right Ctrl, right Alt: lParam bit 24 in Windows)
+    Key { vk: u8, scan: u8, ext: bool, down: bool, repeat: bool },
     Char(u8),
     Move(i32, i32),
     /// 0 left, 1 right, 2 middle
@@ -137,7 +138,7 @@ pub fn pump(wait: Duration) {
         // a pad's Start is the Escape key (pause)
         if let Some(down) = super::dinput::poll() {
             let (vk, scan) = vk_of(KeyCode::Escape).unwrap();
-            h.app.input.push_back(Input::Key { vk, scan, down, repeat: false });
+            h.app.input.push_back(Input::Key { vk, scan, ext: false, down, repeat: false });
         }
     });
 }
@@ -145,7 +146,7 @@ pub fn pump(wait: Duration) {
 /// HOGS_INPUT="9000:click@484,303 12000:Enter 15000:Up*3000": input at fixed times (ms
 /// after start) for tests. `click@x,y` / `rclick@x,y` (frame pixels, after a move there),
 /// `move@x,y`, a key held 100 ms or `*ms` (Enter, Escape, Space, Tab, Up, Down, Left, Right,
-/// Ctrl, Alt, Shift, A-Z, 0-9, Numpad0-9, F1-F12), `close` (the window's close button),
+/// Ctrl, RCtrl, Alt, Shift, A-Z, 0-9, Numpad0-9, F1-F12), `close` (the window's close button),
 /// `blur` / `focus` (the window loses or gets the focus), `poke@511fc0=1` (a dword written to
 /// guest memory, hex address and value),
 /// `text@Name` (typed characters, `_` a space), `pad@A*500` (a control of the scripted pad held,
@@ -208,12 +209,13 @@ fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
             ev.push((t, Input::Focus(what == "focus")));
         } else {
             let (name, hold) = what.split_once('*').map_or((what, 100), |(n, h)| (n, h.parse().unwrap_or(100)));
-            let Some((vk, scan)) = key_by_name(name).and_then(vk_of) else {
+            let Some((code, (vk, scan))) = key_by_name(name).and_then(|k| Some((k, vk_of(k)?))) else {
                 eprintln!("HOGS_INPUT: unknown key {name}");
                 continue;
             };
-            ev.push((t, Input::Key { vk, scan, down: true, repeat: false }));
-            ev.push((t + hold, Input::Key { vk, scan, down: false, repeat: false }));
+            let ext = extended(code);
+            ev.push((t, Input::Key { vk, scan, ext, down: true, repeat: false }));
+            ev.push((t + hold, Input::Key { vk, scan, ext, down: false, repeat: false }));
         }
     }
     ev.sort_by_key(|e| e.0);
@@ -256,6 +258,7 @@ fn key_by_name(n: &str) -> Option<KeyCode> {
         "Left" => ArrowLeft,
         "Right" => ArrowRight,
         "Ctrl" => ControlLeft,
+        "RCtrl" => ControlRight,
         "Alt" => AltLeft,
         "Shift" => ShiftLeft,
         _ => return None,
@@ -635,7 +638,7 @@ impl ApplicationHandler for App {
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if let Some((vk, scan)) = vk_of(code) {
-                        self.input.push_back(Input::Key { vk, scan, down, repeat: event.repeat });
+                        self.input.push_back(Input::Key { vk, scan, ext: extended(code), down, repeat: event.repeat });
                     }
                 }
                 if down {
@@ -649,6 +652,12 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+}
+
+/// Whether a key is one of Windows' extended keys that share their code with another (right
+/// Ctrl and Alt: their left and right halves are told apart by it).
+fn extended(k: KeyCode) -> bool {
+    matches!(k, KeyCode::ControlRight | KeyCode::AltRight)
 }
 
 /// Windows virtual-key code and set-1 scan code for a key.
