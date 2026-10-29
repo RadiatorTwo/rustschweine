@@ -17,7 +17,7 @@ use super::{EXCLUSIVE, guest_call, heap_state, heap_top, log, mem, set_heap_stat
 use crate::rt::{Cpu, ECX, call_original};
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// The step: runs the logic and draws when 40 ms have passed.
@@ -46,11 +46,15 @@ fn cap() -> Option<u32> {
 }
 
 /// Whether pictures are drawn between the steps now (a mission is on): flips do not wait for
-/// the display's refresh then.
+/// the display's refresh then. A mission left for the front end (Escape) calls the step no
+/// more, so it is on only while the step was called lately (else the menus ran unpaced).
 pub fn active() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
+    let since = (super::kernel32::start_time().elapsed().as_millis() as u64).saturating_sub(LAST_STEP.load(Ordering::Relaxed));
+    ACTIVE.load(Ordering::Relaxed) && since < 200
 }
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// When the step was last called, in ms since the start.
+static LAST_STEP: AtomicU64 = AtomicU64::new(0);
 
 /// The camera ([CAMERA]): its position (floats at [[cam + 0x18] + 4...]) and angles
 /// (+0x84, +0x88, +0x8c; 4096 a turn). The drawing builds the view from these
@@ -157,6 +161,7 @@ pub fn blend() -> Option<(f32, u32)> {
 }
 
 pub fn step(c: &mut Cpu) {
+    LAST_STEP.store(super::kernel32::start_time().elapsed().as_millis() as u64, Ordering::Relaxed);
     DRAWN.set(false);
     call_original(c, STEP);
     if DRAWN.get() {
