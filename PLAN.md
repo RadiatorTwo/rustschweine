@@ -148,10 +148,12 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
 - [x] Ground behind the camera drawn over everything while walking (2026-10-29, ours: the
       engine's masks left those blocks out): cut off at the near plane (`ground.rs` shader;
       the water too, which the engine draws whole)
-- [ ] Dark stripes sweeping over the picture when walking and turning (user, 2026-10-29; also
-      with the engine's drawing): not found yet. Not the water behind the camera (counted:
-      none on the screen). Candidates: 2D polys/shadows in the world (afDraw2dPolyIn3dWorld
-      0x1000ea50, sort type 14) or sprites projected without a near plane, the fog
+- [x] Dark stripes sweeping over the picture when walking and turning (2026-10-29): trees the
+      camera walks past, with corners behind it: the engine (0x10011810) puts those on the near
+      plane (z 1.527e-5), so their triangles were drawn huge over everything for a picture
+      (also with HOGS_OBJECTS=engine, where it stays). Ours keeps them behind (`objects.rs`
+      shader), GL cuts them. Found with `HOGS_SHOT_MS=60` and frames darker than both neighbours
+      (the sky, way 2, also reaches behind the camera all the time: still looks the same)
 - [ ] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
       crates falling): they follow the hog by steps (find their positions: afSetObjPos, the
       text's sort entries)

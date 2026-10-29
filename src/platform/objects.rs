@@ -467,10 +467,12 @@ out vec2 uv;
 out float eye;
 void main() {
     // into the camera's space (0x10011810): no nearer than 1.527e-5; with bones (0x10011710)
-    // as it is (the engine leaves out triangles behind the camera, GL cuts them)
+    // as it is (the engine leaves out triangles behind the camera, GL cuts them). Behind the
+    // camera not as the engine: it put those corners on the near plane, so a tree the camera
+    // walks past was drawn huge over the whole picture (dark stripes); kept behind, GL cuts them
     int k = how.z != 0.0 ? clamp(int(bone), 0, 31) * 4 : 0;
     vec3 v = vec3(dot(pos, view[k]), dot(pos, view[k + 1]), dot(pos, view[k + 2])) + view[k + 3];
-    float z = how.z != 0.0 ? v.z : max(v.z, 1.527e-5);
+    float z = how.z != 0.0 || v.z < 0.0 ? v.z : max(v.z, 1.527e-5);
     // projected as 0x10008080 does: focal / z, rhw 8 / z, depth z * 2e-6
     vec2 s = centre + vec2(v.x, -v.y) * (shade.z / z);
     float depth = how.y == 1.0 ? 0.0 : how.y == 2.0 ? 0.9 : z * 2e-6;

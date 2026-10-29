@@ -298,7 +298,7 @@ pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
 }
 
 /// HOGS_SHOT=file.png: the picture shown is written there (as the window shows it), at most
-/// every half second, and at every change of the overlay (for checks without looking). A
+/// every half second (`HOGS_SHOT_MS`), and at every change of the overlay (for checks without looking). A
 /// `{t}` in the name is replaced by the time since start in ms (as in HOGS_INPUT), so every
 /// picture is kept.
 fn shot_path() -> Option<&'static String> {
@@ -308,8 +308,14 @@ fn shot_path() -> Option<&'static String> {
 
 static LAST_SHOT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
+/// HOGS_SHOT_MS: the time between pictures written (500 ms if not set).
+fn shot_every() -> Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    Duration::from_millis(*MS.get_or_init(|| std::env::var("HOGS_SHOT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500)))
+}
+
 fn shot_due(force: bool) -> bool {
-    shot_path().is_some() && (force || LAST_SHOT.lock().unwrap().is_none_or(|t| t.elapsed() >= Duration::from_millis(500)))
+    shot_path().is_some() && (force || LAST_SHOT.lock().unwrap().is_none_or(|t| t.elapsed() >= shot_every()))
 }
 
 fn write_shot(px: &[u32], w: u32, h: u32) {
