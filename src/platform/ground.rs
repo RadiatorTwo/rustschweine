@@ -160,7 +160,10 @@ void main() {
     float d = dot(rot[2], q);
     float inv = d > 937.0 ? 1.0 / d : 0.0021344717 - d * 1.138992379e-6;
     vec2 s = centre + vec2(dot(rot[0], q), -dot(rot[1], q)) * inv;
-    float z = max(d * 2e-6, 1.527e-5);
+    // behind the camera (d < 0) the straight line goes on and gives points on the screen with
+    // the nearest depth (ground behind the camera drawn over everything): in front of the near
+    // plane instead, so GL cuts them off. The engine drew no ground there (its blocks' masks)
+    float z = d < 0.0 ? d * 2e-6 : max(d * 2e-6, 1.527e-5);
     // as the device's vertices: rhw = 8 inv, pixel centres at whole numbers
     float w = 1.0 / (8.0 * inv);
     vec2 p = (s + 0.5) / size * 2.0 - 1.0;

@@ -140,8 +140,21 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
         rhw = 8*inv; z = max(d*2e-6, 1.527e-5). Fog: table, linear by w.
       - Not known: SetGroundLightDirection's formula (diffuse changes at run time?),
         0x1000c040/0x1000c310/0x10009810, sort-list types 0 and 4
-- [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
-      places (afSetObjPos / afDrawObj arguments, or the objects behind them)
+- [x] Hogs move smoothly (2026-10-29, `objects.rs` `smooth`): their 15 bone matrices (world
+      space, worked out by the engine at each drawing: walking, turning and the animation in
+      one) are kept from the last two steps' pictures and blended in the pictures between,
+      element by element with each row's length kept (as quaternions they changed: the
+      matrices are not pure turns). A step's picture shows the step before, as the camera.
+- [x] Ground behind the camera drawn over everything while walking (2026-10-29, ours: the
+      engine's masks left those blocks out): cut off at the near plane (`ground.rs` shader;
+      the water too, which the engine draws whole)
+- [ ] Dark stripes sweeping over the picture when walking and turning (user, 2026-10-29; also
+      with the engine's drawing): not found yet. Not the water behind the camera (counted:
+      none on the screen). Candidates: 2D polys/shadows in the world (afDraw2dPolyIn3dWorld
+      0x1000ea50, sort type 14) or sprites projected without a near plane, the fog
+- [ ] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
+      crates falling): they follow the hog by steps (find their positions: afSetObjPos, the
+      text's sort entries)
 - [ ] More speed: profile with `HOGS_SAMPLE=1` (now Flip ~30%: the swap; see "Next" above)
 - [x] Busy CPU (2026-10-29): with all 16 cores loaded a mission fell from ~550 to ~90 pictures
       a second: PeekMessage gave the time slice away when it found nothing (`yield_now`). Not
