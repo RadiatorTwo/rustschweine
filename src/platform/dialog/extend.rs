@@ -8,7 +8,8 @@
 //! The launcher (LAUNCHERBOX): its Display Mode list (the game's modes, 640x480 to 1024x768)
 //! makes way for ours, the display's resolutions (`display.rs`); the game keeps 640x480 (we
 //! draw the 3D at the window's size anyway, and its menus are made for 640x480). A
-//! "Vollbild" box goes below Detail Level.
+//! "Vollbild" box goes below Detail Level, a "Breitbild" box (missions' 3D as wide as the
+//! window, `wide.rs`) beside it.
 
 use super::template::{Class, Item, Template};
 use super::{Dialog, FIRST_OURS, Kind, Notify};
@@ -26,6 +27,7 @@ const CBN_SELENDOK: u32 = 9;
 
 const RESOLUTION: u32 = FIRST_OURS;
 const FULLSCREEN: u32 = FIRST_OURS + 1;
+const WIDESCREEN: u32 = FIRST_OURS + 2;
 
 const VISIBLE: u32 = 0x1000_0000;
 const TABSTOP: u32 = 0x0001_0000;
@@ -42,9 +44,10 @@ pub fn adjust(name: &str, t: &mut Template) {
     let (Some(mode), Some(detail)) = (place(GAME_MODE), place(DETAIL)) else { return };
     // a drop-down list (CBS_DROPDOWNLIST) where the game's is
     t.items.push(Item { class: Class::ComboBox, id: RESOLUTION, text: String::new(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: mode });
-    // an auto check box (BS_AUTOCHECKBOX) below the Detail Level group, above Start
-    let y = detail[1] + 23;
-    t.items.push(Item { class: Class::Button, id: FULLSCREEN, text: "Vollbild".into(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0], y, detail[2], 10] });
+    // auto check boxes (BS_AUTOCHECKBOX) below the Detail Level group, above Start, side by side
+    let (y, half) = (detail[1] + 23, detail[2] / 2);
+    t.items.push(Item { class: Class::Button, id: FULLSCREEN, text: "Vollbild".into(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0], y, half, 10] });
+    t.items.push(Item { class: Class::Button, id: WIDESCREEN, text: "Breitbild".into(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0] + half, y, detail[2] - half, 10] });
 }
 
 pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
@@ -78,6 +81,10 @@ pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
     if let Some(c) = d.control(FULLSCREEN) {
         c.check = full as u32;
     }
+    let wide = display::widescreen();
+    if let Some(c) = d.control(WIDESCREEN) {
+        c.check = wide as u32;
+    }
 }
 
 pub fn ok(d: &mut Dialog) {
@@ -90,6 +97,9 @@ pub fn ok(d: &mut Dialog) {
     });
     if let Some(on) = d.control(FULLSCREEN).map(|c| c.check != 0) {
         display::set_fullscreen(on);
+    }
+    if let Some(on) = d.control(WIDESCREEN).map(|c| c.check != 0) {
+        display::set_widescreen(on);
     }
     if let Some(v) = size {
         display::set_chosen((v != 0).then_some((v >> 16, v & 0xffff)));

@@ -7,6 +7,10 @@
 //! Fullscreen (borderless, on the window's display) is REG_DWORD `Fullscreen` in the game's
 //! key (default off): our "Vollbild" box in the launcher and Alt+Enter set it; the window
 //! starts that way.
+//!
+//! Widescreen (missions' 3D as wide as the picture's aspect, `wide.rs`) is REG_DWORD
+//! `Widescreen` in the game's key (default off): our "Breitbild" box in the launcher;
+//! `HOGS_WIDE=0|1` overrides it (scripted tests).
 
 use super::{advapi32, window};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -64,4 +68,17 @@ pub fn remember_fullscreen(on: bool) {
 pub fn set_fullscreen(on: bool) {
     remember_fullscreen(on);
     window::set_fullscreen(on);
+}
+
+/// The widescreen choice (`HOGS_WIDE` first).
+pub fn widescreen() -> bool {
+    match std::env::var("HOGS_WIDE").ok().as_deref() {
+        Some(v) => v != "0",
+        None => advapi32::value("", "Widescreen").is_some_and(|(_, d)| d.first().is_some_and(|&b| b != 0)),
+    }
+}
+
+/// Preferences' OK: saved.
+pub fn set_widescreen(on: bool) {
+    advapi32::set_value("", "Widescreen", 4, &(on as u32).to_le_bytes());
 }
