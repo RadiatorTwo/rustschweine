@@ -300,7 +300,11 @@ fn peek_message(c: &mut Cpu) -> u32 {
             1
         }
         None => {
-            std::thread::yield_now();
+            // menus poll in a loop: let others run; a mission draws between its steps instead
+            // (giving the time slice away there costs whole milliseconds when the core is busy)
+            if !super::fps::active() {
+                std::thread::yield_now();
+            }
             0
         }
     }

@@ -8,19 +8,34 @@
 //! word is not 0); ours is drawn where the engine has just drawn its own (after the page
 //! buffers' flush at 0x10003b83, before 0x1000c040), so the order of drawing stays the same.
 //! `HOGS_GROUND=engine`: the engine's ground (for comparing).
+//!
+//! The water (0x1000b440, before the ground) the same way: its 33 x 33 corners (0x68 bytes, as
+//! the map's) at 0x11abe1a0 move along y each picture; the engine projects 4 corners and draws
+//! each of the 32 x 32 quads by itself (a fan A B D C; the uv of all four corners kept in D).
 
 use super::{d3d, mem};
-use crate::rt::{Cpu, call_original};
+use crate::rt::{Cpu, ESP, call_original};
 use glow::HasContext;
 use std::cell::RefCell;
 
 /// Called by the scene drawing (0x10003380) right after the ground.
 pub const AFTER_GROUND: u32 = 0x1000_c040;
+/// Draws the water.
+pub const WATER: u32 = 0x1000_b440;
 
 /// The map's corners: 65 x 65 of 0x68 bytes. x, y, z floats at +0, +4, +8 (z up), the lit
 /// colour +0xc, page +0x40 and tile on it +0x42 (a tile's from its first corner), u[4] +0x48,
 /// v[4] +0x58 (the tile's four corners, rotation and flip applied).
 const GRID: u32 = 0x11af_aa30;
+const WATER_GRID: u32 = 0x11ab_e1a0;
+const WATER_ROW: u32 = 33 * CORNER;
+/// How far the water moves each picture, and back by when it went a whole 1024.
+const WATER_STEP: (u32, u32) = (0x1002_0168, 0x1002_016c);
+/// The engine's record of the device's state: a counter of changes, the state set (13: the
+/// water's), the texture set.
+const STATE_CHANGES: u32 = 0x11ab_945c;
+const STATE_SET: u32 = 0x1002_bf4c;
+const TEXTURE_SET: u32 = 0x11ab_9490;
 const CORNER: u32 = 0x68;
 const ROW: u32 = 65 * CORNER;
 /// Texture pages: 32 records of 0xd4 bytes; +0 the texture surface, +0x10 a flag per tile
@@ -41,12 +56,76 @@ const ROT: [[u32; 3]; 3] = [
     [0x11ab_d96c, 0x11ab_e180, 0x11ab_e190],
 ];
 
+/// The water's corners move along y; the quads by the GPU (0x1000b440).
+pub fn water(c: &mut Cpu) {
+    if !ours() {
+        call_original(c, WATER);
+        return;
+    }
+    let m = mem();
+    // the device's state for it, as the engine sets it (and records that it did)
+    if m.rd32(STATE_SET) != 13 {
+        m.wr32(STATE_CHANGES, m.rd32(STATE_CHANGES).wrapping_add(1));
+        d3d::set_render_state(9, 2);
+        d3d::set_render_state(27, 1);
+        d3d::set_texture_stage_state(0, 4, 4);
+        m.wr32(STATE_SET, 13);
+    }
+    let tex = m.rd32(PAGES);
+    if m.rd32(TEXTURE_SET) != tex {
+        d3d::set_texture(0, tex);
+        m.wr32(TEXTURE_SET, tex);
+    }
+    // the inner corners move; back by a step when at a whole 1024 (an extra picture would
+    // only have it undone: it moves them where it reads them)
+    let (step, back) = (f32_at(WATER_STEP.0), f32_at(WATER_STEP.1));
+    let moved = |a: u32| {
+        let v = f32_at(a) - step;
+        let t = v as f64 as i64 as i32;
+        if t.unsigned_abs() & 0x3ff == 0 { v - back } else { v }
+    };
+    let extra = super::fps::in_extra();
+    if !extra {
+        for col in 1..32 {
+            for row in 1..32 {
+                let a = WATER_GRID + row * WATER_ROW + col * CORNER + 4;
+                m.wr32(a, moved(a).to_bits());
+            }
+        }
+    }
+    let inner = |p: u32| {
+        let k = (p - WATER_GRID) / CORNER;
+        let (row, col) = (k / 33, k % 33);
+        (1..32).contains(&row) && (1..32).contains(&col)
+    };
+    let mut verts = Vec::with_capacity(32 * 32 * 6);
+    for row in 0..32 {
+        for col in 0..32 {
+            let a = WATER_GRID + row * WATER_ROW + col * CORNER;
+            let (b, cc, d) = (a + CORNER, a + WATER_ROW, a + WATER_ROW + CORNER);
+            // blue, half seen; green where the corner is marked
+            let color = if m.rd8(d + 0x24) & 0x1f != 0 { 0x8000_ff00 } else { 0x8084_84ff };
+            let v = |p: u32, k: u32| Vertex {
+                pos: [f32_at(p), if extra && inner(p) { moved(p + 4) } else { f32_at(p + 4) }, f32_at(p + 8)],
+                uv: [f32_at(d + 0x48 + k * 4), f32_at(d + 0x58 + k * 4)],
+                color,
+            };
+            let (va, vb, vd, vc) = (v(a, 1), v(b, 2), v(d, 3), v(cc, 0));
+            verts.extend([va, vb, vd, va, vd, vc]);
+        }
+    }
+    draw_water(tex, &verts);
+    // ret
+    c.r[ESP] += 4;
+}
+
 fn ours() -> bool {
     static OURS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OURS.get_or_init(|| std::env::var("HOGS_GROUND").map_or(true, |v| v != "engine"))
 }
 
 pub fn after_ground(c: &mut Cpu) {
+    super::objects::new_scene();
     if ours() && mem().rd32(MASKED) == 1 {
         hide_engine_ground();
         draw();
@@ -109,6 +188,8 @@ struct Gpu {
     centre: Option<glow::UniformLocation>,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
+    /// the water's, loaded each picture
+    water: (glow::VertexArray, glow::Buffer),
     verts: Vec<Vertex>,
     /// texture surface, first vertex, count
     pages: Vec<(u32, i32, i32)>,
@@ -158,29 +239,69 @@ fn tiles() -> (Vec<Vertex>, Vec<(u32, i32, i32)>) {
     (verts, pages)
 }
 
+/// A vertex array of `Vertex`es and its buffer.
+fn vertex_array(gl: &glow::Context) -> (glow::VertexArray, glow::Buffer) {
+    unsafe {
+        let vao = gl.create_vertex_array().expect("GL vertex array");
+        let vbo = gl.create_buffer().expect("GL buffer");
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        let stride = size_of::<Vertex>() as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 20);
+        gl.bind_vertex_array(None);
+        (vao, vbo)
+    }
+}
+
+fn gpu(gl: &glow::Context) -> Gpu {
+    let prog = d3d::own_program(gl, VS);
+    let l = |n: &str| unsafe { gl.get_uniform_location(prog.prog, n) };
+    let (cam, rot, centre) = (l("cam"), l("rot"), l("centre"));
+    let (vao, vbo) = vertex_array(gl);
+    Gpu { prog, cam, rot, centre, vao, vbo, water: vertex_array(gl), verts: Vec::new(), pages: Vec::new() }
+}
+
+/// The camera's uniforms (set after `apply`: the program is in use).
+fn camera(gl: &glow::Context, g: &Gpu) {
+    let m = mem();
+    let rot: Vec<f32> = ROT.iter().flatten().map(|&a| f32_at(a)).collect();
+    unsafe {
+        gl.uniform_3_f32(g.cam.as_ref(), f32_at(CAMERA), f32_at(CAMERA + 4), f32_at(CAMERA + 8));
+        gl.uniform_3_f32_slice(g.rot.as_ref(), &rot);
+        gl.uniform_2_f32(g.centre.as_ref(), m.rd32(CENTRE) as i32 as f32, m.rd32(CENTRE + 4) as i32 as f32);
+    }
+}
+
+fn draw_water(tex: u32, verts: &[Vertex]) {
+    d3d::own_draw(|own| {
+        let gl = own.gl;
+        GPU.with_borrow_mut(|g| {
+            let g = g.get_or_insert_with(|| gpu(gl));
+            own.apply(&g.prog, tex);
+            camera(gl, g);
+            unsafe {
+                gl.bind_vertex_array(Some(g.water.0));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(g.water.1));
+                let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, size_of_val(verts));
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+                gl.draw_arrays(glow::TRIANGLES, 0, verts.len() as i32);
+                gl.bind_vertex_array(None);
+            }
+        });
+    });
+}
+
 fn draw() {
     let (verts, pages) = tiles();
     d3d::own_draw(|own| {
         let gl = own.gl;
         GPU.with_borrow_mut(|g| {
-            let g = g.get_or_insert_with(|| unsafe {
-                let prog = d3d::own_program(gl, VS);
-                let l = |n: &str| gl.get_uniform_location(prog.prog, n);
-                let (cam, rot, centre) = (l("cam"), l("rot"), l("centre"));
-                let vao = gl.create_vertex_array().expect("GL vertex array");
-                let vbo = gl.create_buffer().expect("GL buffer");
-                gl.bind_vertex_array(Some(vao));
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                let stride = size_of::<Vertex>() as i32;
-                gl.enable_vertex_attrib_array(0);
-                gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
-                gl.enable_vertex_attrib_array(1);
-                gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
-                gl.enable_vertex_attrib_array(2);
-                gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 20);
-                gl.bind_vertex_array(None);
-                Gpu { prog, cam, rot, centre, vao, vbo, verts: Vec::new(), pages: Vec::new() }
-            });
+            let g = g.get_or_insert_with(|| gpu(gl));
             unsafe {
                 // loaded again only when the map changed (craters)
                 if g.verts != verts {
@@ -190,13 +311,9 @@ fn draw() {
                     g.verts = verts;
                 }
                 g.pages = pages;
-                let m = mem();
-                let rot: Vec<f32> = ROT.iter().flatten().map(|&a| f32_at(a)).collect();
                 for &(surface, first, count) in &g.pages {
                     own.apply(&g.prog, surface);
-                    gl.uniform_3_f32(g.cam.as_ref(), f32_at(CAMERA), f32_at(CAMERA + 4), f32_at(CAMERA + 8));
-                    gl.uniform_3_f32_slice(g.rot.as_ref(), &rot);
-                    gl.uniform_2_f32(g.centre.as_ref(), m.rd32(CENTRE) as i32 as f32, m.rd32(CENTRE + 4) as i32 as f32);
+                    camera(gl, g);
                     gl.bind_vertex_array(Some(g.vao));
                     gl.draw_arrays(glow::TRIANGLES, first, count);
                 }

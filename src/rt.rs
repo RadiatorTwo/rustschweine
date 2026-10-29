@@ -92,7 +92,9 @@ impl Memory {
         #[cfg(windows)]
         let base = unsafe {
             use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS, VirtualAlloc};
-            VirtualAlloc(std::ptr::null(), GUEST_SPAN, MEM_RESERVE, PAGE_NOACCESS) as *mut u8
+            const MEM_WRITE_WATCH: u32 = 0x20_0000;
+            // write watch: the pages an extra picture writes are found by it (platform::fps)
+            VirtualAlloc(std::ptr::null(), GUEST_SPAN, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS) as *mut u8
         };
         #[cfg(unix)]
         let base = unsafe {

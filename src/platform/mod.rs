@@ -21,6 +21,7 @@ pub mod fps;
 pub mod gdi32;
 pub mod gl;
 pub mod ground;
+pub mod objects;
 pub mod kernel32;
 pub mod misc;
 pub mod sample;
@@ -516,10 +517,6 @@ fn catch_faults() {
     unsafe extern "system" fn on_fault(info: *mut EXCEPTION_POINTERS) -> i32 {
         let rec = unsafe { &*(*info).ExceptionRecord };
         if rec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION as NTSTATUS {
-            // a write to a page an extra picture may change: saved, and the write goes on
-            if rec.ExceptionInformation[0] == 1 && fps::on_write_fault(rec.ExceptionInformation[1]) {
-                return -1; // EXCEPTION_CONTINUE_EXECUTION
-            }
             let kind = ["read", "write", "execute"].get(rec.ExceptionInformation[0]).unwrap_or(&"access");
             report_fault(kind, rec.ExceptionInformation[1], rec.ExceptionAddress as usize);
         }
@@ -681,6 +678,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[
     (fps::RENDER, fps::render),
     (fps::STEP, fps::step),
     (ground::AFTER_GROUND, ground::after_ground),
+    (ground::WATER, ground::water),
+    (objects::DRAW_OBJ, objects::draw_obj),
 ];
 
 /// The loaded engine DLL (Data/_d3d.dll): its exports, for GetProcAddress.

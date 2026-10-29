@@ -4,9 +4,11 @@
 //!
 //! An extra picture runs the game's own drawing again. Drawing changes some of the game's
 //! state (counters, blinking, freed objects, scratch buffers), so an extra picture is a
-//! transaction: the EXE's data and the heap are write-protected, the first write to a page
-//! saves it (`on_write_fault`), and afterwards every saved page is copied back and the heap's
-//! bookkeeping put back. No other guest thread runs meanwhile (`EXCLUSIVE`). Windows only.
+//! transaction: the pages it writes of the EXE's and the engine's data and of the heap are put
+//! back afterwards, and the heap's bookkeeping. Which pages were written the system tells
+//! (guest memory is reserved with write watch: `GetWriteWatch`); their contents before come
+//! from a copy of those ranges, brought up to date before each extra picture with the pages
+//! written since. No other guest thread runs meanwhile (`EXCLUSIVE`). Windows only.
 //!
 //! `HOGS_FPS`: unset or `max` unlimited, a number caps the pictures per second, 0 the original
 //! (one picture per step).
@@ -169,7 +171,11 @@ fn extra_picture(c: &mut Cpu) {
     let saved_regs = c.r;
     let heap = heap_state();
     EXCLUSIVE.store(true, Ordering::Relaxed);
-    arm(&[EXE_DATA, DLL_DATA, (HEAP_LO, (heap_top() + PAGE as u32 - 1) & !(PAGE as u32 - 1))]);
+    let ranges = [EXE_DATA, DLL_DATA, (HEAP_LO, (heap_top() + PAGE as u32 - 1) & !(PAGE as u32 - 1))];
+    if !SHADOW.with_borrow_mut(|s| s.sync(&ranges)) {
+        EXCLUSIVE.store(false, Ordering::Relaxed);
+        return;
+    }
     let t1 = Instant::now();
     EXTRA.set(true);
     // the camera between the last two steps (written now: put back with the rest)
@@ -181,7 +187,7 @@ fn extra_picture(c: &mut Cpu) {
     guest_call(c, RENDER, &[]);
     EXTRA.set(false);
     let t2 = Instant::now();
-    disarm();
+    SHADOW.with_borrow_mut(|s| s.restore());
     set_heap_state(heap);
     EXCLUSIVE.store(false, Ordering::Relaxed);
     c.r = saved_regs;
@@ -191,71 +197,97 @@ fn extra_picture(c: &mut Cpu) {
 
 static TIMES: Mutex<Vec<[Duration; 3]>> = Mutex::new(Vec::new());
 
-// ---- pages saved at their first write ---------------------------------------------------------
+// ---- pages put back -------------------------------------------------------------------------
 
-/// Write-protected host ranges (start, end) while armed.
-static RANGES: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
-static ARMED: AtomicBool = AtomicBool::new(false);
-/// The saved pages: host address and contents.
-static SAVED: Mutex<Vec<(usize, Box<[u8]>)>> = Mutex::new(Vec::new());
-/// Pages saved in all, for the statistics.
-static FAULTS: AtomicUsize = AtomicUsize::new(0);
+/// Pages put back in all, for the statistics.
+static RESTORED: AtomicUsize = AtomicUsize::new(0);
+
+/// A copy of guest memory ranges as they were before an extra picture.
+#[derive(Default)]
+struct Shadow {
+    /// guest start of each range and its copy
+    ranges: Vec<(u32, Vec<u8>)>,
+    /// written pages, as the system reports them
+    found: Vec<usize>,
+}
+
+thread_local! {
+    static SHADOW: std::cell::RefCell<Shadow> = std::cell::RefCell::new(Shadow::default());
+}
 
 fn host(a: u32) -> usize {
     mem().slice(a, 0).as_ptr() as usize
 }
 
+/// The pages written in `n` bytes at host address `at` since it was last asked (and from now
+/// on not written), into `out`: None when the system cannot tell.
 #[cfg(windows)]
-fn protect(at: usize, n: usize, write: bool) {
-    use windows_sys::Win32::System::Memory::{PAGE_READONLY, PAGE_READWRITE, VirtualProtect};
-    let mut old = 0;
-    let ok = unsafe { VirtualProtect(at as _, n, if write { PAGE_READWRITE } else { PAGE_READONLY }, &mut old) };
-    assert!(ok != 0, "VirtualProtect {at:#x} +{n:#x}");
+fn written(at: usize, n: usize, out: &mut Vec<usize>) -> Option<()> {
+    use windows_sys::Win32::System::Memory::GetWriteWatch;
+    const WRITE_WATCH_FLAG_RESET: u32 = 1;
+    out.clear();
+    out.resize(n / PAGE, 0);
+    let mut count = out.len();
+    let mut gran = 0u32;
+    let r = unsafe { GetWriteWatch(WRITE_WATCH_FLAG_RESET, at as _, n, out.as_mut_ptr() as _, &mut count, &mut gran) };
+    out.truncate(count);
+    (r == 0).then_some(())
 }
 
 #[cfg(not(windows))]
-fn protect(_: usize, _: usize, _: bool) {}
-
-fn arm(ranges: &[(u32, u32)]) {
-    let mut r = RANGES.lock().unwrap();
-    r.clear();
-    for &(lo, hi) in ranges {
-        let (a, b) = (host(lo), host(lo) + (hi - lo) as usize);
-        protect(a, b - a, false);
-        r.push((a, b));
-    }
-    ARMED.store(true, Ordering::SeqCst);
+fn written(_: usize, _: usize, _: &mut Vec<usize>) -> Option<()> {
+    None
 }
 
-fn disarm() {
-    ARMED.store(false, Ordering::SeqCst);
-    for &(a, b) in RANGES.lock().unwrap().iter() {
-        protect(a, b - a, true);
+impl Shadow {
+    /// Bring the copy up to date with `ranges` (guest start, end): the pages written since the
+    /// last time; a range new or grown is copied (its new part). False when written pages
+    /// cannot be found (no extra pictures then).
+    fn sync(&mut self, ranges: &[(u32, u32)]) -> bool {
+        if self.ranges.len() != ranges.len() || self.ranges.iter().zip(ranges).any(|(s, r)| s.0 != r.0) {
+            self.ranges = ranges.iter().map(|r| (r.0, Vec::new())).collect();
+        }
+        let mut found = std::mem::take(&mut self.found);
+        for (k, &(lo, hi)) in ranges.iter().enumerate() {
+            let at = host(lo);
+            let copy = &mut self.ranges[k].1;
+            if written(at, (hi - lo) as usize, &mut found).is_none() {
+                self.ranges.clear();
+                return false;
+            }
+            for &p in &found {
+                let off = p - at;
+                if off + PAGE <= copy.len() {
+                    copy[off..off + PAGE].copy_from_slice(mem().slice(lo + off as u32, PAGE));
+                }
+            }
+            let old = copy.len().min((hi - lo) as usize);
+            copy.truncate(old);
+            copy.extend_from_slice(mem().slice(lo + old as u32, (hi - lo) as usize - old));
+        }
+        self.found = found;
+        true
     }
-    let mut saved = SAVED.lock().unwrap();
-    for (at, page) in saved.drain(..) {
-        unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), at as *mut u8, PAGE) };
+
+    /// Put back the pages written since `sync`.
+    fn restore(&mut self) {
+        let mut found = std::mem::take(&mut self.found);
+        for (lo, copy) in &self.ranges {
+            let at = host(*lo);
+            if written(at, copy.len(), &mut found).is_none() {
+                continue;
+            }
+            for &p in &found {
+                let off = p - at;
+                mem().slice(*lo + off as u32, PAGE).copy_from_slice(&copy[off..off + PAGE]);
+            }
+            RESTORED.fetch_add(found.len(), Ordering::Relaxed);
+        }
+        self.found = found;
     }
 }
 
-/// A write fault at host address `a`: when it is in an armed range, save the page and let the
-/// write go on. Called from the exception handler.
-pub fn on_write_fault(a: usize) -> bool {
-    if !ARMED.load(Ordering::SeqCst) {
-        return false;
-    }
-    let page = a & !(PAGE - 1);
-    if !RANGES.lock().unwrap().iter().any(|&(lo, hi)| page >= lo && page < hi) {
-        return false;
-    }
-    let copy: Box<[u8]> = unsafe { std::slice::from_raw_parts(page as *const u8, PAGE) }.into();
-    SAVED.lock().unwrap().push((page, copy));
-    protect(page, PAGE, true);
-    FAULTS.fetch_add(1, Ordering::Relaxed);
-    true
-}
-
-/// `HOGS_FPS_LOG=1`: pictures per second and pages saved per extra picture, every 2 s.
+/// `HOGS_FPS_LOG=1`: pictures per second and pages put back per extra picture, every 2 s.
 pub fn stats() {
     static T: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
     if std::env::var_os("HOGS_FPS_LOG").is_none() {
@@ -270,10 +302,10 @@ pub fn stats() {
         let k = times.len().max(1) as u32;
         let sum = times.drain(..).fold([Duration::ZERO; 3], |a, t| [a[0] + t[0], a[1] + t[1], a[2] + t[2]]);
         log!(
-            "fps: {:.0} pictures a second, {} extra; per extra: {} pages saved, protect {:?}, draw {:?}, put back {:?}",
+            "fps: {:.0} pictures a second, {} extra; per extra: {} pages put back, copy {:?}, draw {:?}, put back {:?}",
             *n as f64 / secs,
             k,
-            FAULTS.swap(0, Ordering::Relaxed) / k as usize,
+            RESTORED.swap(0, Ordering::Relaxed) / k as usize,
             sum[0] / k,
             sum[1] / k,
             sum[2] / k

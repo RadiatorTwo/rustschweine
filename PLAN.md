@@ -1,6 +1,6 @@
 # Plan — what is done, what is open
 
-Updated 2026-10-28. Details on how things work: CLAUDE.md.
+Updated 2026-10-29. Details on how things work: CLAUDE.md.
 
 ## Done
 
@@ -99,8 +99,17 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
       when it changes (`d3d.rs` `applied`, `gl::TOUCHED`). Blt copies onto the Direct3D picture
       go to GL as BltFast's do. Mission now 120-200 pictures a second (was 85-120), main
       thread ~90% busy; `HOGS_SAMPLE` names the module and our caller for host time.
-      Next: objects (afDrawObj, trees: 0x10008080, 0x100085e0 are the top of the profile),
-      then hogs. Known so far:
+      Done (2026-10-29, second part): objects, trees, sky (way 2) and the hogs (bones) by
+      the GPU (`objects.rs`: afDrawObj replaced; models in a vertex buffer, transform, light,
+      projection in a shader; `HOGS_OBJECTS=check` compares every vertex with the engine's:
+      within 0.006 pixels, colours and uv exact), the water too (`ground.rs`: 1024
+      DrawPrimitive calls a picture before). The transaction by write watch instead of write
+      protection and page faults (`fps.rs` `Shadow`). First mission: 155 -> ~570 pictures a
+      second; the main thread now waits ~30% in Flip (the GPU, the swap).
+      Next: what is left on the CPU: the visibility test 0x10010610 transforms all of a
+      model's vertices when its quick test fails (0x10011810, 0x10010910 ~4%); 2D polys and
+      sprites in the world (afDraw2dPolyIn3dWorld, sort types 3/14); the scene walk itself.
+      Hogs' moving parts still at 25 a second (see below). Known so far:
       - afSetMap(map): the EXE's map is 64x64 tiles of 0x14 bytes (+0 height word, +0xe
         type in the low 7 bits, +0x12 texture word); the engine's grid is 65x65 corners of
         0x68 bytes at 0x11afaa38 (rows 0x1a68 apart): x and z floats at -8 and -4 (-0x4000 +
@@ -133,9 +142,11 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
         0x1000c040/0x1000c310/0x10009810, sort-list types 0 and 4
 - [ ] Interpolate the hogs and other moving objects (still at 25 a second): find their
       places (afSetObjPos / afDrawObj arguments, or the objects behind them)
-- [ ] More speed: profile with `HOGS_SAMPLE=1` (DLL 0x10013f20, 0x10008080, 0x100085e0,
-      rt_string; ~400 pages saved per extra picture: leave the back buffer and the engine's
-      vertex buffers out of the transaction)
+- [ ] More speed: profile with `HOGS_SAMPLE=1` (now Flip ~30%: the swap; see "Next" above)
+- [x] Busy CPU (2026-10-29): with all 16 cores loaded a mission fell from ~550 to ~90 pictures
+      a second: PeekMessage gave the time slice away when it found nothing (`yield_now`). Not
+      in missions now: ~270 under full load. What is left under load is the GL driver
+      (nvoglv64, its own thread): fewer GL calls should help (objects drawn together)
 - [ ] A setting for the rate (registry, Preferences), as future_rust_cop's `FrameRate`
 - [ ] Linux: the transaction needs mprotect + SIGSEGV (`fps.rs` is Windows only)
 - [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)

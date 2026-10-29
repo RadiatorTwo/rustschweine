@@ -114,14 +114,22 @@ draws, all vertices), `HOGS_TRACE_MSG`, `HOGS_D3D_LOG`, `HOGS_DD_LOG`, `HOGS_WAT
 ### Frame rate (`src/platform/fps.rs`)
 
 Missions step every 40 ms (0x47f930: logic 0x49fea0, then the drawing 0x44e290). Between
-steps the drawing runs again for extra pictures, as a transaction: EXE .data, engine DLL .data
-and the heap are write-protected (`arm`), the exception handler saves each page at its first
-write (`on_write_fault`), afterwards the pages and the heap's bookkeeping are put back; no
-other guest thread runs meanwhile (`EXCLUSIVE`; `guest_call` takes the turn before writing
-guest memory). The camera ([0x537f98]: position floats at [[+0x18]+4], angles +0x84/0x88/0x8c,
-4096 a turn) is set between the last two steps; a step's own picture shows the step before.
+steps the drawing runs again for extra pictures, as a transaction: the pages it writes of EXE
+.data, engine DLL .data and the heap are put back afterwards, and the heap's bookkeeping. Guest
+memory is reserved with `MEM_WRITE_WATCH`; `GetWriteWatch` names the written pages, their old
+contents come from a copy of those ranges (`Shadow`, brought up to date before each extra
+picture); no other guest thread runs meanwhile (`EXCLUSIVE`; `guest_call` takes the turn
+before writing guest memory). Host code that writes guest memory in a picture should write
+only changed values (each page written costs a copy). The camera ([0x537f98]: position floats
+at [[+0x18]+4], angles +0x84/0x88/0x8c, 4096 a turn) is set between the last two steps; a
+step's own picture shows the step before.
 `HOGS_FPS` = cap (0: original), `HOGS_FPS_LOG=1` statistics, `HOGS_SAMPLE=1` a sampling
 profiler (`sample.rs`: guest function / import / host helper the main thread is in).
+The mission's 3D is drawn by our own shaders, not by the engine's CPU code (each checked
+against the engine's vertices): ground and water (`ground.rs`), objects, trees, the sky and the
+hogs with their bones (`objects.rs`, afDrawObj; models kept in a vertex buffer, the object's
+or bones' matrices as uniforms; `HOGS_OBJECTS=engine|check`, `HOGS_GROUND=engine`; the module
+comments describe the engine's data). `examples/pngdiff.rs` compares two `HOGS_SHOT`s.
 Direct3D draws are batched by state (`d3d.rs` `Pipe`); a flip of a Direct3D picture shows the
 GL texture directly (`d3d::show`). x87 under 24 bits to nearest (Direct3D's control word
 0x3f) is computed inline (`lift/x87.rs` `arith`), exact (falls back to `rt_fpu_round` on a

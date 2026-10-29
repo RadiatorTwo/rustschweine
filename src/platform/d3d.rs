@@ -267,6 +267,38 @@ fn dev_set_render_state(c: &mut Cpu) -> u32 {
     OK
 }
 
+/// A device render state (D3DRENDERSTATETYPE) as the game set it.
+pub fn render_state(k: usize) -> u32 {
+    STATE.with_borrow(|st| st.rs.get(k).copied().unwrap_or(0))
+}
+
+/// Set a device render state, as SetRenderState does.
+pub fn set_render_state(k: usize, v: u32) {
+    STATE.with_borrow_mut(|st| {
+        if let Some(s) = st.rs.get_mut(k) {
+            *s = v;
+        }
+    });
+}
+
+/// Set a texture stage state, as SetTextureStageState does.
+pub fn set_texture_stage_state(stage: usize, k: usize, v: u32) {
+    STATE.with_borrow_mut(|st| {
+        if let Some(s) = st.tss.get_mut(stage).and_then(|t| t.get_mut(k)) {
+            *s = v;
+        }
+    });
+}
+
+/// Set a stage's texture (a surface), as SetTexture does.
+pub fn set_texture(stage: usize, surface: u32) {
+    STATE.with_borrow_mut(|st| {
+        if let Some(s) = st.tex.get_mut(stage) {
+            *s = surface;
+        }
+    });
+}
+
 fn dev_get_render_state(c: &mut Cpu) -> u32 {
     let k = arg(c, 1) as usize;
     let v = STATE.with_borrow(|st| st.rs.get(k).copied().unwrap_or(0));
