@@ -111,6 +111,12 @@ impl Cam {
     }
 }
 
+/// The camera as text (position, angles), for the marks of a recording (`window.rs`).
+pub fn camera_text() -> Option<String> {
+    let c = Cam::read()?;
+    Some(format!("pos={:.2},{:.2},{:.2} ang={},{},{}", c.pos[0], c.pos[1], c.pos[2], c.ang[0], c.ang[1], c.ang[2]))
+}
+
 thread_local! {
     /// The camera of the last two steps, and when the last one was drawn.
     static CAMS: Cell<Option<(Cam, Cam, Instant)>> = const { Cell::new(None) };

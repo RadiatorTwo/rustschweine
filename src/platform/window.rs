@@ -146,15 +146,27 @@ pub fn pump(wait: Duration) {
 /// HOGS_INPUT="9000:click@484,303 12000:Enter 15000:Up*3000": input at fixed times (ms
 /// after start) for tests. `click@x,y` / `rclick@x,y` (frame pixels, after a move there),
 /// `move@x,y`, a key held 100 ms or `*ms` (Enter, Escape, Space, Tab, Up, Down, Left, Right,
-/// Ctrl, RCtrl, Alt, Shift, A-Z, 0-9, Numpad0-9, F1-F12), `close` (the window's close button),
+/// Ctrl, RCtrl, Alt, RAlt, Shift, RShift, Backspace, Insert, Delete, Home, End, PageUp,
+/// PageDown, A-Z, 0-9, Numpad0-9, F1-F12), `close` (the window's close button),
 /// `blur` / `focus` (the window loses or gets the focus), `poke@511fc0=1` (a dword written to
 /// guest memory, hex address and value),
 /// `text@Name` (typed characters, `_` a space), `pad@A*500` (a control of the scripted pad held,
 /// `dinput::CONTROLS`), `pad@LX=-1*1000` (its stick at a value, -1...1, y up).
+/// `HOGS_INPUT=@file.txt` reads the items from a file (as `HOGS_RECORD` writes them); `#`
+/// starts a comment to the end of the line.
 fn scripted(input: &mut VecDeque<Input>) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
-    let script = s.get_or_insert_with(|| std::env::var("HOGS_INPUT").map(|v| parse_script(&v)).unwrap_or_default());
+    let script = s.get_or_insert_with(|| {
+        let Ok(v) = std::env::var("HOGS_INPUT") else { return VecDeque::new() };
+        match v.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path).map(|t| parse_script(&t)).unwrap_or_else(|e| {
+                eprintln!("HOGS_INPUT: cannot read {path}: {e}");
+                VecDeque::new()
+            }),
+            None => parse_script(&v),
+        }
+    });
     let now = super::kernel32::start_time().elapsed().as_millis() as u64;
     while script.front().is_some_and(|e| e.0 <= now) {
         match script.pop_front().unwrap().1 {
@@ -167,7 +179,7 @@ fn scripted(input: &mut VecDeque<Input>) {
 
 fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
     let mut ev = Vec::new();
-    for item in text.split_whitespace() {
+    for item in text.lines().flat_map(|l| l.split('#').next().unwrap_or("").split_whitespace()) {
         let Some((t, what)) = item.split_once(':') else { continue };
         let Ok(t) = t.parse::<u64>() else { continue };
         let at = |s: &str| -> Option<(i32, i32)> {
@@ -260,9 +272,105 @@ fn key_by_name(n: &str) -> Option<KeyCode> {
         "Ctrl" => ControlLeft,
         "RCtrl" => ControlRight,
         "Alt" => AltLeft,
+        "RAlt" => AltRight,
         "Shift" => ShiftLeft,
+        "RShift" => ShiftRight,
+        "Backspace" => Backspace,
+        "Insert" => Insert,
+        "Delete" => Delete,
+        "Home" => Home,
+        "End" => End,
+        "PageUp" => PageUp,
+        "PageDown" => PageDown,
         _ => return None,
     })
+}
+
+/// The name of a key in HOGS_INPUT, if it has one.
+fn key_name(k: KeyCode) -> Option<String> {
+    let d = format!("{k:?}");
+    let n = d.strip_prefix("Key").or(d.strip_prefix("Digit")).or(d.strip_prefix("Arrow")).unwrap_or(match d.as_str() {
+        "ControlLeft" => "Ctrl",
+        "ControlRight" => "RCtrl",
+        "AltLeft" => "Alt",
+        "AltRight" => "RAlt",
+        "ShiftLeft" => "Shift",
+        "ShiftRight" => "RShift",
+        _ => &d,
+    });
+    (key_by_name(n) == Some(k)).then(|| n.to_string())
+}
+
+/// HOGS_RECORD=file.txt: the player's input is written there as HOGS_INPUT items, one a line,
+/// to be played again with `HOGS_INPUT=@file.txt` (keys with how long they were held, clicks,
+/// the mouse's moves at most every 50 ms, focus, close; not typed characters or the wheel).
+/// F11 marks a moment: a comment line with the time and the camera, and the picture shown
+/// written to `file.txt.<time>.png`.
+struct Recorder {
+    file: std::fs::File,
+    path: String,
+    /// keys held, and since when
+    keys: Vec<(KeyCode, u64)>,
+    /// buttons held: since when, where
+    buttons: [Option<(u64, i32, i32)>; 2],
+    last_move: u64,
+}
+
+static RECORD: std::sync::LazyLock<Mutex<Option<Recorder>>> = std::sync::LazyLock::new(|| {
+    Mutex::new((|| {
+        let path = std::env::var("HOGS_RECORD").ok()?;
+        let file = std::fs::File::create(&path).map_err(|e| eprintln!("HOGS_RECORD: cannot write {path}: {e}")).ok()?;
+        Some(Recorder { file, path, keys: Vec::new(), buttons: [None; 2], last_move: 0 })
+    })())
+});
+
+/// A picture to write at the next draw (a mark of the recording).
+static MARK_SHOT: Mutex<Option<String>> = Mutex::new(None);
+
+fn record(f: impl FnOnce(&mut Recorder, u64)) {
+    if let Some(r) = RECORD.lock().unwrap().as_mut() {
+        f(r, super::kernel32::start_time().elapsed().as_millis() as u64);
+    }
+}
+
+impl Recorder {
+    fn put(&mut self, t: u64, item: &str) {
+        use std::io::Write;
+        let _ = writeln!(self.file, "{t}:{item}");
+    }
+
+    fn key(&mut self, t: u64, k: KeyCode, down: bool) {
+        let held = self.keys.iter().position(|e| e.0 == k);
+        match (down, held) {
+            (true, None) => self.keys.push((k, t)),
+            (false, Some(i)) => {
+                let (k, since) = self.keys.remove(i);
+                if let Some(name) = key_name(k) {
+                    self.put(since, &format!("{name}*{}", (t - since).max(1)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn button(&mut self, t: u64, b: u8, down: bool, (x, y): (i32, i32)) {
+        let Some(slot) = self.buttons.get_mut(b as usize) else { return };
+        if down {
+            *slot = Some((t, x, y));
+        } else if let Some((since, x, y)) = slot.take() {
+            // a scripted click presses 30 ms after the move
+            self.put(since.saturating_sub(30), &format!("{}@{x},{y}", ["click", "rclick"][b as usize]));
+        }
+    }
+
+    fn mark(&mut self, t: u64) {
+        use std::io::Write;
+        let cam = super::fps::camera_text().unwrap_or_else(|| "no camera".into());
+        let _ = writeln!(self.file, "# mark {t} {cam}");
+        let shot = format!("{}.{t:06}.png", self.path);
+        eprintln!("HOGS_RECORD: mark {t} {cam}, {shot}");
+        *MARK_SHOT.lock().unwrap() = Some(shot);
+    }
 }
 
 /// The next input event, if any (call `pump` first).
@@ -507,9 +615,15 @@ impl App {
             return;
         }
         let want_shot = shot_due(self.overlay_changed);
-        if let Some((px, w, h)) = gl.draw(size.width, size.height, want_shot) {
-            write_shot(&px, w, h);
-            self.overlay_changed = false;
+        let mark = MARK_SHOT.lock().unwrap().take();
+        if let Some((px, w, h)) = gl.draw(size.width, size.height, want_shot || mark.is_some()) {
+            if let Some(path) = mark {
+                let _ = std::fs::write(path, png(&px, w, h));
+            }
+            if want_shot {
+                write_shot(&px, w, h);
+                self.overlay_changed = false;
+            }
         }
     }
 
@@ -584,8 +698,14 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, e: WindowEvent) {
         match e {
-            WindowEvent::CloseRequested => self.input.push_back(Input::Close),
-            WindowEvent::Focused(f) => self.input.push_back(Input::Focus(f)),
+            WindowEvent::CloseRequested => {
+                record(|r, t| r.put(t, "close"));
+                self.input.push_back(Input::Close)
+            }
+            WindowEvent::Focused(f) => {
+                record(|r, t| r.put(t, if f { "focus" } else { "blur" }));
+                self.input.push_back(Input::Focus(f))
+            }
             WindowEvent::Resized(size) => {
                 self.keep_fullscreen();
                 if let Some(gl) = &self.gl {
@@ -599,6 +719,12 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 let (x, y) = self.frame_pos();
+                record(|r, t| {
+                    if t >= r.last_move + 50 {
+                        r.last_move = t;
+                        r.put(t, &format!("move@{x},{y}"));
+                    }
+                });
                 self.input.push_back(Input::Move(x, y));
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -617,6 +743,8 @@ impl ApplicationHandler for App {
                     MouseButton::Middle => 2,
                     _ => return,
                 };
+                let pos = self.frame_pos();
+                record(|r, t| r.button(t, b, state == ElementState::Pressed, pos));
                 self.input.push_back(Input::Button(b, state == ElementState::Pressed));
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -637,6 +765,15 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    if RECORD.lock().unwrap().is_some() && code == KeyCode::F11 {
+                        if down && !event.repeat {
+                            record(|r, t| r.mark(t));
+                        }
+                        return;
+                    }
+                    if !event.repeat {
+                        record(|r, t| r.key(t, code, down));
+                    }
                     if let Some((vk, scan)) = vk_of(code) {
                         self.input.push_back(Input::Key { vk, scan, ext: extended(code), down, repeat: event.repeat });
                     }
@@ -725,4 +862,20 @@ fn vk_of(k: KeyCode) -> Option<(u8, u8)> {
         Pause => (0x13, 0x45),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recorded_keys_play_again() {
+        for n in ["A", "Z", "0", "9", "Numpad5", "F11", "Enter", "Escape", "Space", "Up", "Ctrl", "RCtrl", "RAlt", "Shift", "PageDown"] {
+            assert_eq!(key_name(key_by_name(n).unwrap()).as_deref(), Some(n));
+        }
+        assert_eq!(key_name(KeyCode::NumpadEnter), None);
+        let s = parse_script("100:Up*850\n# mark 500 pos=1.00,2.00,3.00 ang=0,1,2\n900:click@10,20 # left\n");
+        assert_eq!(s.len(), 5);
+        assert_eq!(s.back().unwrap().0, 1030);
+    }
 }

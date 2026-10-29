@@ -118,7 +118,9 @@ shaders' outputs are `centroid` (else edge pixels sampled past a ground tile int
 transparent border: thin lines between far tiles).
 Env: `HOGS_SHOT=file.png` (the shown frame; `{t}` in the name keeps all, `HOGS_SHOT_MS` apart), `HOGS_INPUT` (scripted input, see
 `window.rs`; into the first mission: `"1500:click@424,338 8000:Enter 11000:Enter 14000:Enter
-17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s), `HOGS_MONITOR=1` (the window opens on that display), `HOGS_TRACE_API` (with
+17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s; `HOGS_INPUT=@file.txt`
+reads a file), `HOGS_RECORD=file.txt` (the player's input written as HOGS_INPUT items; F11 a mark:
+time, camera and the picture as `file.txt.<t>.png`), `HOGS_MONITOR=1` (the window opens on that display), `HOGS_TRACE_API` (with
 arguments), `HOGS_D3D_DUMP=folder` (textures as PNG), `HOGS_D3D_LOG=<texture hex>` (only its
 draws, all vertices), `HOGS_TRACE_MSG`, `HOGS_D3D_LOG`, `HOGS_DD_LOG`, `HOGS_WATCH`.
 
