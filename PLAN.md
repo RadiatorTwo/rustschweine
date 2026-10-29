@@ -195,4 +195,13 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       always given 640x480 (with 1024x768 its own menus came out enlarged and cut off, the HUD
       smaller): its hidden list is set to it and CBN_SELENDOK sent, which is where the game
       takes the mode from (0x481910), not from the list at Start
-- [ ] Widescreen, a frame rate setting
+- [x] Widescreen (2026-10-29, `wide.rs`, spec and plan in `docs/superpowers/`): the launcher's
+      "Breitbild" box (`Widescreen` in the game's key, `HOGS_WIDE=0|1`); in missions the 3D
+      as wide as the window's aspect, the same height, the HUD in the middle 4:3 part (moving
+      it to the edges: later), menus 4:3. `d3d.rs` draws into a framebuffer reaching `margin`
+      game pixels past the 640x480 screen on each side (`origin` uniform; viewport and clears
+      over the whole width widened). While a mission picture is drawn the engine's horizontal
+      culling factor [0x1013e6b4] is widened (objects at the sides kept) and the weather's
+      flakes (screen pixels, wrapped at the screen's width) wrap at the wide width and move
+      left by the margin. Not checked yet: explosions and other effects at the sides
+- [ ] A frame rate setting

@@ -8,14 +8,27 @@
 //! values:
 //! - [CULL_X] (afIfaceInit 0x1000fca0: focal length / screen width): the objects' visibility
 //!   test 0x10010610 keeps a point when |x * [CULL_X]| < z.
+//! - The weather (`weather`: snow 0x44fe00, the other kind 0x44fa50, from 0x44f9b0): 128
+//!   flakes in screen pixels, moved as the camera turns and wrapped at the screen's width
+//!   ([[SETTINGS] + 0x44c], 640) and height. They wrap at the wide picture's width while it is
+//!   drawn, and their quads (4 pre-transformed corners of 0x20 bytes each, pointed to by
+//!   +0x20 of each 0x28-byte poly at +0x10004 of the weather) move left by the margin. Their
+//!   places stay between pictures (only looks: nothing else reads them).
 
 use super::{display, mem};
+use crate::rt::{Cpu, ECX, call_original};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 /// The engine's focal length (float) and horizontal culling factor (float).
 const FOCAL: u32 = 0x1013_1b1c;
 const CULL_X: u32 = 0x1013_e6b4;
+/// The weather's drawing (thiscall, ecx: the weather): snow and the other kind.
+pub const SNOW: u32 = 0x44_fe00;
+pub const RAIN: u32 = 0x44_fa50;
+/// The game's settings (pointer): the screen's width at +0x44c.
+const SETTINGS: u32 = 0x52_0668;
+const FLAKES: u32 = 128;
 
 thread_local! {
     /// The last mission picture's margin, and when it was drawn.
@@ -62,6 +75,35 @@ pub fn around(f: impl FnOnce()) {
     f();
     if mm.rd32(CULL_X) != old {
         mm.wr32(CULL_X, old);
+    }
+}
+
+pub fn snow(c: &mut Cpu) {
+    weather(c, SNOW);
+}
+
+pub fn rain(c: &mut Cpu) {
+    weather(c, RAIN);
+}
+
+/// The weather drawn across the wide picture (see the module's comment).
+fn weather(c: &mut Cpu, addr: u32) {
+    let m = margin();
+    if m == 0.0 {
+        return call_original(c, addr);
+    }
+    let mm = mem();
+    let (obj, width) = (c.r[ECX], mm.rd32(SETTINGS) + 0x44c);
+    let old = mm.rd32(width);
+    mm.wr32(width, (640.0 + 2.0 * m).round() as u32);
+    call_original(c, addr);
+    mm.wr32(width, old);
+    for k in 0..FLAKES {
+        let quad = mm.rd32(obj + 0x10004 + k * 0x28 + 0x20);
+        for v in 0..4 {
+            let x = quad + v * 0x20;
+            mm.wr32(x, (f32::from_bits(mm.rd32(x)) - m).to_bits());
+        }
     }
 }
 
