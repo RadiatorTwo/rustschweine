@@ -20,8 +20,7 @@ use crate::rt::{Cpu, ECX, call_original};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-/// The engine's focal length (float) and horizontal culling factor (float).
-const FOCAL: u32 = 0x1013_1b1c;
+/// The engine's horizontal culling factor (float).
 const CULL_X: u32 = 0x1013_e6b4;
 /// The weather's drawing (thiscall, ecx: the weather): snow and the other kind.
 pub const SNOW: u32 = 0x44_fe00;
@@ -68,12 +67,13 @@ pub fn around(f: impl FnOnce()) {
     }
     let mm = mem();
     let old = mm.rd32(CULL_X);
-    let cull = f32::from_bits(mm.rd32(FOCAL)) / (640.0 + 2.0 * m);
-    if cull.to_bits() != old {
-        mm.wr32(CULL_X, cull.to_bits());
+    let cull = (f32::from_bits(old) * 640.0 / (640.0 + 2.0 * m)).to_bits();
+    if cull != old {
+        mm.wr32(CULL_X, cull);
     }
     f();
-    if mm.rd32(CULL_X) != old {
+    // unless the engine set it meanwhile
+    if mm.rd32(CULL_X) == cull {
         mm.wr32(CULL_X, old);
     }
 }
@@ -100,6 +100,9 @@ fn weather(c: &mut Cpu, addr: u32) {
     mm.wr32(width, old);
     for k in 0..FLAKES {
         let quad = mm.rd32(obj + 0x10004 + k * 0x28 + 0x20);
+        if quad == 0 {
+            continue;
+        }
         for v in 0..4 {
             let x = quad + v * 0x20;
             mm.wr32(x, (f32::from_bits(mm.rd32(x)) - m).to_bits());

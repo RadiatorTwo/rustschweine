@@ -81,7 +81,7 @@ pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
     if let Some(c) = d.control(FULLSCREEN) {
         c.check = full as u32;
     }
-    let wide = display::widescreen();
+    let wide = display::widescreen_saved();
     if let Some(c) = d.control(WIDESCREEN) {
         c.check = wide as u32;
     }

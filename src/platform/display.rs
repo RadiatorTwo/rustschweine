@@ -70,15 +70,30 @@ pub fn set_fullscreen(on: bool) {
     window::set_fullscreen(on);
 }
 
-/// The widescreen choice (`HOGS_WIDE` first).
+/// The widescreen choice (`HOGS_WIDE` first): 0 off, 1 on, 2 not read yet (asked for every
+/// mission picture).
+static WIDE: AtomicU32 = AtomicU32::new(2);
+
 pub fn widescreen() -> bool {
-    match std::env::var("HOGS_WIDE").ok().as_deref() {
-        Some(v) => v != "0",
-        None => advapi32::value("", "Widescreen").is_some_and(|(_, d)| d.first().is_some_and(|&b| b != 0)),
+    let v = WIDE.load(Ordering::Relaxed);
+    if v != 2 {
+        return v == 1;
     }
+    let on = match std::env::var("HOGS_WIDE").ok().as_deref() {
+        Some(v) => v != "0",
+        None => widescreen_saved(),
+    };
+    WIDE.store(on as u32, Ordering::Relaxed);
+    on
 }
 
-/// Preferences' OK: saved.
+/// The saved widescreen choice (the launcher's box shows it, not `HOGS_WIDE`).
+pub fn widescreen_saved() -> bool {
+    advapi32::value("", "Widescreen").is_some_and(|(_, d)| d.first().is_some_and(|&b| b != 0))
+}
+
+/// Preferences' OK: saved (`HOGS_WIDE` still overrides it).
 pub fn set_widescreen(on: bool) {
     advapi32::set_value("", "Widescreen", 4, &(on as u32).to_le_bytes());
+    WIDE.store(2, Ordering::Relaxed);
 }
