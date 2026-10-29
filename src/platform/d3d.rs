@@ -568,10 +568,10 @@ uniform vec2 size;
 // the game's x, y at the framebuffer's top left (the margin: widescreen)
 uniform vec2 origin;
 flat out vec4 bounds;
-out vec4 diffuse;
-out vec4 specular;
-out vec2 uv;
-out float eye;
+centroid out vec4 diffuse;
+centroid out vec4 specular;
+centroid out vec2 uv;
+centroid out float eye;
 void main() {
     // screen pixels (centres at whole numbers in Direct3D) to clip space, top row at the top;
     // w = 1 / rhw gives perspective-correct interpolation. A negative rhw is a corner behind
@@ -617,10 +617,12 @@ uniform int add_specular;
 uniform int fog;
 uniform vec3 fog_color;
 uniform vec3 fog_table;
-in vec4 diffuse;
-in vec4 specular;
-in vec2 uv;
-in float eye;
+// centroid: with multisampling a pixel at a triangle's edge is computed where the triangle
+// is, not at its centre outside it (the uv there past a tile's edge in the texture: thin gaps)
+centroid in vec4 diffuse;
+centroid in vec4 specular;
+centroid in vec2 uv;
+centroid in float eye;
 out vec4 color;
 
 vec4 arg(int a, vec4 t) {

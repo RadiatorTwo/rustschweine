@@ -113,7 +113,9 @@ volume, which the game sets from master volume x fades; not kept between runs on
 Widescreen in missions: `wide.rs` (what the engine cuts at 640 widened while a mission picture is
 drawn), `d3d.rs` `margin`; `HOGS_WIDE=0|1` overrides the launcher's "Breitbild".
 Antialiasing: the launcher's "Antialiasing" list (REG_DWORD `Antialiasing`, samples) multisamples
-Direct3D's framebuffer (`d3d.rs` `resolve`); `HOGS_MSAA=<samples>` overrides it.
+Direct3D's framebuffer (`d3d.rs` `resolve`); `HOGS_MSAA=<samples>` overrides it. The
+shaders' outputs are `centroid` (else edge pixels sampled past a ground tile into the atlas's
+transparent border: thin lines between far tiles).
 Env: `HOGS_SHOT=file.png` (the shown frame; `{t}` in the name keeps all, `HOGS_SHOT_MS` apart), `HOGS_INPUT` (scripted input, see
 `window.rs`; into the first mission: `"1500:click@424,338 8000:Enter 11000:Enter 14000:Enter
 17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s), `HOGS_MONITOR=1` (the window opens on that display), `HOGS_TRACE_API` (with

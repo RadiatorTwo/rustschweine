@@ -462,10 +462,10 @@ uniform vec3 base;
 uniform vec3 tint;
 // alpha, way (1: in front of everything), bones
 uniform vec3 how;
-out vec4 diffuse;
-out vec4 specular;
-out vec2 uv;
-out float eye;
+centroid out vec4 diffuse;
+centroid out vec4 specular;
+centroid out vec2 uv;
+centroid out float eye;
 flat out vec4 bounds;
 void main() {
     // into the camera's space (0x10011810): no nearer than 1.527e-5; with bones (0x10011710)

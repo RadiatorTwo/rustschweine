@@ -150,10 +150,10 @@ uniform vec2 origin;
 uniform vec3 cam;
 uniform vec3 rot[3];
 uniform vec2 centre;
-out vec4 diffuse;
-out vec4 specular;
-out vec2 uv;
-out float eye;
+centroid out vec4 diffuse;
+centroid out vec4 specular;
+centroid out vec2 uv;
+centroid out float eye;
 flat out vec4 bounds;
 void main() {
     // the engine's projection (0x10013f20): depth d along the view; in front of 937 1/d,
