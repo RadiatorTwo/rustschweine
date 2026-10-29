@@ -153,6 +153,7 @@ out vec4 diffuse;
 out vec4 specular;
 out vec2 uv;
 out float eye;
+flat out vec4 bounds;
 void main() {
     // the engine's projection (0x10013f20): depth d along the view; in front of 937 1/d,
     // nearer a straight line touching it there (no near plane)
@@ -164,14 +165,16 @@ void main() {
     // the nearest depth (ground behind the camera drawn over everything): in front of the near
     // plane instead, so GL cuts them off. The engine drew no ground there (its blocks' masks)
     float z = d < 0.0 ? d * 2e-6 : max(d * 2e-6, 1.527e-5);
-    // as the device's vertices: rhw = 8 inv, pixel centres at whole numbers
+    // as the device's vertices: rhw = 8 inv, pixel centres at whole numbers (and a little up
+    // and left: see the device's vertex shader)
     float w = 1.0 / (8.0 * inv);
-    vec2 p = (s + 0.5) / size * 2.0 - 1.0;
+    vec2 p = (s + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, z * 2.0 - 1.0, 1.0) * w;
     eye = w;
     diffuse = dif.bgra;
     specular = vec4(1.0);
     uv = tc;
+    bounds = vec4(-1e30, -1e30, 1e30, 1e30);
 }
 "#;
 

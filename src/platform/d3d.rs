@@ -497,7 +497,8 @@ impl State {
     }
 }
 
-/// A vertex as we draw it: x, y, z, rhw, u, v, diffuse and specular (ARGB words).
+/// A vertex as we draw it: x, y, z, rhw, u, v, diffuse and specular (ARGB words), and where
+/// its triangle's texture is sampled (`bound`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
@@ -505,6 +506,51 @@ struct Vertex {
     uv: [f32; 2],
     diffuse: u32,
     specular: u32,
+    bounds: [f32; 4],
+}
+
+/// No bounds: the texture is sampled at each pixel's centre.
+const UNBOUNDED: [f32; 4] = [-1e30, -1e30, 1e30, 1e30];
+
+/// 2D graphics (triangles of one rhw) at a higher resolution. A triangle covers the pixels
+/// whose centres it covers at the game's resolution, but its edges are half a game pixel off
+/// their edges: the tiles of 2D graphics left a half pixel at their top and left edges to the
+/// tile before (often transparent there) and sampled the texels next to theirs in the texture
+/// at the other edges (thin gaps between the tiles). A triangle with corners on whole pixels
+/// (most) is moved by that half pixel onto the pixels' edges, its texture coordinates back by
+/// as much (a straight map on the screen, rhw being one); each gets `bounds`, the centres it
+/// covers at the game's resolution (x, y at least and at most), where its texture is sampled.
+fn bound(vs: &mut [Vertex]) {
+    for t in vs.chunks_exact_mut(3) {
+        if t.iter().any(|v| v.pos[3] != t[0].pos[3]) {
+            continue;
+        }
+        let (xs, ys) = (t.iter().map(|v| v.pos[0]), t.iter().map(|v| v.pos[1]));
+        let (x0, y0) = (xs.clone().fold(f32::MAX, f32::min), ys.clone().fold(f32::MAX, f32::min));
+        let (x1, y1) = (xs.fold(f32::MIN, f32::max), ys.fold(f32::MIN, f32::max));
+        // pixel centres from the top left edge on, before the bottom right one
+        let b = [x0.ceil(), y0.ceil(), x1.ceil() - 1.0, y1.ceil() - 1.0];
+        let whole = t.iter().all(|v| v.pos[0].fract() == 0.0 && v.pos[1].fract() == 0.0);
+        // the texture coordinates' change per pixel right and down
+        let (dx1, dy1, dx2, dy2) = (t[1].pos[0] - t[0].pos[0], t[1].pos[1] - t[0].pos[1], t[2].pos[0] - t[0].pos[0], t[2].pos[1] - t[0].pos[1]);
+        let det = dx1 * dy2 - dx2 * dy1;
+        if whole && det != 0.0 {
+            let d = |k: usize| {
+                let (d1, d2) = (t[1].uv[k] - t[0].uv[k], t[2].uv[k] - t[0].uv[k]);
+                ((d1 * dy2 - d2 * dy1) / det, (d2 * dx1 - d1 * dx2) / det)
+            };
+            let (du, dv) = (d(0), d(1));
+            for v in t.iter_mut() {
+                v.pos[0] -= 0.5;
+                v.pos[1] -= 0.5;
+                v.uv[0] -= 0.5 * (du.0 + du.1);
+                v.uv[1] -= 0.5 * (dv.0 + dv.1);
+            }
+        }
+        for v in t {
+            v.bounds = b;
+        }
+    }
 }
 
 const VS: &str = r#"
@@ -512,7 +558,9 @@ layout(location = 0) in vec4 pos;
 layout(location = 1) in vec2 tc;
 layout(location = 2) in vec4 dif;
 layout(location = 3) in vec4 spe;
+layout(location = 4) in vec4 box;
 uniform vec2 size;
+flat out vec4 bounds;
 out vec4 diffuse;
 out vec4 specular;
 out vec2 uv;
@@ -524,13 +572,17 @@ void main() {
     // by the same depth, so x * w stays a straight line): GL cuts it off at w = 0, where with
     // w = 1 its far-off x, y stretched the triangle over the picture (the dark stripes)
     float w = pos.w != 0.0 ? 1.0 / pos.w : 1.0;
-    vec2 p = (pos.xy + 0.5) / size * 2.0 - 1.0;
+    // A pixel whose centre is on an edge is the triangle's in Direct3D when the edge is its
+    // left or top one; GL's rule differs (y is up there), and such rows between two tiles of
+    // 2D graphics stayed empty: so the corners are a little up and left, no centre on an edge
+    vec2 p = (pos.xy + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, pos.z * 2.0 - 1.0, 1.0) * w;
     eye = w;
     // ARGB words: their bytes are B G R A
     diffuse = dif.bgra;
     specular = spe.bgra;
     uv = tc;
+    bounds = box;
 }
 "#;
 
@@ -540,6 +592,13 @@ void main() {
 /// start and end are distances, not depths).
 const FS: &str = r#"
 uniform sampler2D tex;
+uniform vec2 size;
+// the framebuffer's pixels per screen pixel
+uniform vec2 pixel;
+// the texture is filtered (bilinear)
+uniform int filtered;
+// where the triangle's texture is sampled, x, y at least and at most (see `bound`)
+flat in vec4 bounds;
 uniform int textured;
 uniform ivec3 color_op;
 uniform ivec3 alpha_op;
@@ -601,8 +660,39 @@ bool passes(float a) {
     }
 }
 
+// 2D graphics at a higher resolution: the texture's alpha as at the game's resolution, at the
+// centre of the game's pixel (else filtering made a tile's edge next to transparent texels
+// partly transparent, where at the game's resolution it is not: thin gaps); its colour
+// filtered from the texels that are not transparent
+vec4 flat_texel(vec2 at, vec2 centre) {
+    float a = texture(tex, centre).a;
+    if (filtered == 0) return vec4(texture(tex, at).rgb, a);
+    ivec2 n = textureSize(tex, 0);
+    vec2 p = at * vec2(n) - 0.5;
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - floor(p);
+    vec4 sum = vec4(0.0);
+    for (int k = 0; k < 4; k++) {
+        ivec2 d = ivec2(k & 1, k >> 1);
+        vec4 t = texelFetch(tex, clamp(i + d, ivec2(0), n - 1), 0);
+        float w = mix(1.0 - f.x, f.x, float(d.x)) * mix(1.0 - f.y, f.y, float(d.y)) * t.a;
+        sum += vec4(t.rgb * w, w);
+    }
+    return vec4(sum.a > 0.0 ? sum.rgb / sum.a : texture(tex, at).rgb, a);
+}
+
 void main() {
-    vec4 t = textured != 0 ? texture(tex, uv) : vec4(1.0);
+    // the texture where this pixel is in the screen's pixels (centres at whole numbers), but
+    // within `bounds` (y is up here)
+    vec2 g = vec2(gl_FragCoord.x, size.y * pixel.y - gl_FragCoord.y) / pixel - 0.5 + 1.0 / 64.0;
+    vec2 lo = bounds.xy;
+    vec2 hi = max(bounds.zw, lo);
+    vec2 ux = pixel.x * dFdx(uv);
+    vec2 uy = -pixel.y * dFdy(uv);
+    vec2 o = clamp(g, lo, hi) - g;
+    vec2 at = uv + o.x * ux + o.y * uy;
+    vec2 m = clamp(floor(g + 0.5), lo, hi) - g;
+    vec4 t = textured == 0 ? vec4(1.0) : bounds.x > -1e29 ? flat_texel(at, uv + m.x * ux + m.y * uy) : texture(tex, at);
     vec4 c = clamp(vec4(op(color_op, t).rgb, op(alpha_op, t).a), 0.0, 1.0);
     if (add_specular != 0) c.rgb = min(c.rgb + specular.rgb, 1.0);
     if (!passes(c.a)) discard;
@@ -620,6 +710,8 @@ void main() {
 #[derive(Clone, Copy)]
 struct Uniforms {
     size: Option<glow::UniformLocation>,
+    pixel: Option<glow::UniformLocation>,
+    filtered: Option<glow::UniformLocation>,
     tex: Option<glow::UniformLocation>,
     textured: Option<glow::UniformLocation>,
     color_op: Option<glow::UniformLocation>,
@@ -638,6 +730,8 @@ impl Uniforms {
         let l = |n: &str| unsafe { gl.get_uniform_location(prog, n) };
         Uniforms {
             size: l("size"),
+            pixel: l("pixel"),
+            filtered: l("filtered"),
             tex: l("tex"),
             textured: l("textured"),
             color_op: l("color_op"),
@@ -926,6 +1020,8 @@ impl Render {
             gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 24);
             gl.enable_vertex_attrib_array(3);
             gl.vertex_attrib_pointer_f32(3, 4, glow::UNSIGNED_BYTE, true, stride, 28);
+            gl.enable_vertex_attrib_array(4);
+            gl.vertex_attrib_pointer_f32(4, 4, glow::FLOAT, false, stride, 32);
             gl.bind_vertex_array(None);
             let low = super::gl::texture(gl, false);
             Render {
@@ -1183,11 +1279,12 @@ impl Render {
         ts[TSS_MAGFILTER] = 1;
         ts[TSS_MINFILTER] = 1;
         let pipe = Pipe { mode: glow::TRIANGLES, tex, rs, ts, viewport: [0, 0, self.size.0, self.size.1] };
-        // pixel edges are half a pixel before the centres
+        // pixel edges are half a pixel before the centres; sampled at most at the last centres
         let (x0, y0, x1, y1) = (dr[0] as f32 - 0.5, dr[1] as f32 - 0.5, dr[2] as f32 - 0.5, dr[3] as f32 - 0.5);
         let (w, h) = (info.w as f32, info.h as f32);
         let (u0, v0, u1, v1) = (sr[0] as f32 / w, sr[1] as f32 / h, sr[2] as f32 / w, sr[3] as f32 / h);
-        let v = |x, y, u, v| Vertex { pos: [x, y, 0.0, 1.0], uv: [u, v], diffuse: !0, specular: 0 };
+        let bounds = [dr[0] as f32, dr[1] as f32, dr[2] as f32 - 1.0, dr[3] as f32 - 1.0];
+        let v = |x, y, u, v| Vertex { pos: [x, y, 0.0, 1.0], uv: [u, v], diffuse: !0, specular: 0, bounds };
         let quad = [v(x0, y0, u0, v0), v(x1, y0, u1, v0), v(x0, y1, u0, v1), v(x1, y0, u1, v0), v(x1, y1, u1, v1), v(x0, y1, u0, v1)];
         match &mut self.batch {
             Some((p, v)) if *p == pipe => v.extend_from_slice(&quad),
@@ -1282,6 +1379,8 @@ impl Render {
             let fc = argb(rs[RS_FOGCOLOR]);
             let want = FsUniforms {
                 size: [self.size.0 as f32, self.size.1 as f32],
+                pixel: [self.phys.0 as f32 / self.size.0.max(1) as f32, self.phys.1 as f32 / self.size.1.max(1) as f32],
+                filtered: (ts[TSS_MAGFILTER] >= 2) as i32,
                 textured: tex.is_some() as i32,
                 color_op: [ts[TSS_COLOROP] as i32, ts[TSS_COLORARG1] as i32, ts[TSS_COLORARG2] as i32],
                 alpha_op: [ts[TSS_ALPHAOP] as i32, ts[TSS_ALPHAARG1] as i32, ts[TSS_ALPHAARG2] as i32],
@@ -1299,6 +1398,12 @@ impl Render {
             });
             if have.size != want.size {
                 gl.uniform_2_f32(u.size.as_ref(), want.size[0], want.size[1]);
+            }
+            if have.filtered != want.filtered {
+                gl.uniform_1_i32(u.filtered.as_ref(), want.filtered);
+            }
+            if have.pixel != want.pixel {
+                gl.uniform_2_f32(u.pixel.as_ref(), want.pixel[0], want.pixel[1]);
             }
             if have.textured != want.textured {
                 gl.uniform_1_i32(u.textured.as_ref(), want.textured);
@@ -1414,6 +1519,8 @@ struct Cache {
 #[derive(Clone, Copy, PartialEq)]
 struct FsUniforms {
     size: [f32; 2],
+    pixel: [f32; 2],
+    filtered: i32,
     textured: i32,
     color_op: [i32; 3],
     alpha_op: [i32; 3],
@@ -1431,6 +1538,8 @@ impl FsUniforms {
     fn unknown() -> FsUniforms {
         FsUniforms {
             size: [-1.0; 2],
+            pixel: [-1.0; 2],
+            filtered: -1,
             textured: -1,
             color_op: [-1; 3],
             alpha_op: [-1; 3],
@@ -1528,6 +1637,7 @@ fn draw(kind: u32, fvf: u32, verts: u32, n: u32, seq: &[u32]) {
             uv: tc.map_or([0.0; 2], |o| [f(a + o), f(a + o + 4)]),
             diffuse: diffuse.map_or(0xffff_ffff, |o| m.rd32(a + o)),
             specular: specular.map_or(0xff00_0000, |o| m.rd32(a + o)),
+            bounds: UNBOUNDED,
         }
     };
     let len = seq.len();
@@ -1552,6 +1662,9 @@ fn draw(kind: u32, fvf: u32, verts: u32, n: u32, seq: &[u32]) {
     let (flat, unsupported) = STATE.with_borrow(|st| {
         (st.rs[RS_SHADEMODE] == 1, (st.rs[RS_COLORKEYENABLE], st.tss[1][TSS_COLOROP]))
     });
+    if mode == glow::TRIANGLES {
+        bound(&mut vs);
+    }
     if flat {
         for p in vs.chunks_mut(per) {
             let (d, s) = (p[0].diffuse, p[0].specular);

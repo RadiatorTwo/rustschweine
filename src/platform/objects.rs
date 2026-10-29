@@ -465,6 +465,7 @@ out vec4 diffuse;
 out vec4 specular;
 out vec2 uv;
 out float eye;
+flat out vec4 bounds;
 void main() {
     // into the camera's space (0x10011810): no nearer than 1.527e-5; with bones (0x10011710)
     // as it is (the engine leaves out triangles behind the camera, GL cuts them). Behind the
@@ -477,7 +478,8 @@ void main() {
     vec2 s = centre + vec2(v.x, -v.y) * (shade.z / z);
     float depth = how.y == 1.0 ? 0.0 : how.y == 2.0 ? 0.9 : z * 2e-6;
     float w = z / 8.0;
-    vec2 p = (s + 0.5) / size * 2.0 - 1.0;
+    // pixel centres at whole numbers, a little up and left (see the device's vertex shader)
+    vec2 p = (s + 0.5 - 1.0 / 64.0) / size * 2.0 - 1.0;
     gl_Position = vec4(p.x, -p.y, depth * 2.0 - 1.0, 1.0) * w;
     eye = w;
     // the light (0x10011600): ambient, the direction's part when facing it, at most 2031616,
@@ -490,6 +492,7 @@ void main() {
     diffuse = vec4(c / 255.0, how.x / 255.0);
     specular = vec4(1.0);
     uv = tc;
+    bounds = vec4(-1e30, -1e30, 1e30, 1e30);
 }
 "#;
 
