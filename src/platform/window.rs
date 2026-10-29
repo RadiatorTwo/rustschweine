@@ -47,6 +47,8 @@ struct App {
     /// an Alt key is held (Alt+Enter toggles fullscreen)
     alt: bool,
     shift: bool,
+    /// times `keep_fullscreen` had to make the window fullscreen again
+    refits: u32,
 }
 
 struct Host {
@@ -94,6 +96,7 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                     cursor: PhysicalPosition::new(0.0, 0.0),
                     alt: false,
                     shift: false,
+                    refits: 0,
                 },
             }
         });
@@ -433,6 +436,11 @@ pub fn display_modes() -> ((u32, u32), Vec<(u32, u32)>) {
     })
 }
 
+/// Borderless fullscreen on the display the window is on.
+fn borderless(w: &Window) -> winit::window::Fullscreen {
+    winit::window::Fullscreen::Borderless(w.current_monitor())
+}
+
 /// Is the window fullscreen?
 pub fn is_fullscreen() -> bool {
     on_main() && with_host(|h| h.app.window.as_ref().is_some_and(|w| w.fullscreen().is_some()))
@@ -446,7 +454,7 @@ pub fn set_fullscreen(on: bool) {
     with_host(|h| {
         if let Some(w) = &h.app.window {
             if w.fullscreen().is_some() != on {
-                w.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                w.set_fullscreen(on.then(|| borderless(w)));
             }
         }
     });
@@ -509,12 +517,21 @@ impl App {
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
             .or_else(super::display::chosen);
         let attrs = Window::default_attributes().with_title(title);
-        let attrs = attrs.with_fullscreen(super::display::fullscreen().then_some(winit::window::Fullscreen::Borderless(None)));
         let attrs = match size {
             Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(LogicalSize::new(1280.0, 960.0)),
         };
+        // HOGS_MONITOR=1: opened on that display (0 the first; tests)
+        let attrs = match std::env::var("HOGS_MONITOR").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| el.available_monitors().nth(i)) {
+            Some(m) => attrs.with_position(winit::dpi::PhysicalPosition::new(m.position().x + 50, m.position().y + 50)),
+            None => attrs,
+        };
         let (win, gl) = Gl::new(el, attrs);
+        // fullscreen once the window is where Windows put it (made fullscreen right away, it
+        // got the main display's size and could still be moved to another one)
+        if super::display::fullscreen() {
+            win.set_fullscreen(Some(borderless(&win)));
+        }
         // to the front, while our start window still has the foreground (Windows lets only the
         // foreground's process bring a window forward)
         win.focus_window();
@@ -522,6 +539,20 @@ impl App {
         self.gl = Some(gl);
         if let Some((px, w, h)) = self.early.take() {
             self.frame(&px, w, h);
+        }
+    }
+
+    /// Fullscreen but not filling the display: Windows gave the window its first size and place
+    /// after it went fullscreen (the start position on another display, from the terminal that
+    /// started us). Fullscreen again, from a window (winit leaves the same fullscreen as it is).
+    fn keep_fullscreen(&mut self) {
+        let Some(w) = &self.window else { return };
+        let Some(m) = w.current_monitor() else { return };
+        let (pos, size) = (w.outer_position().ok(), w.inner_size());
+        if w.fullscreen().is_some() && (size != m.size() || pos != Some(m.position())) && self.refits < 8 {
+            self.refits += 1;
+            w.set_fullscreen(None);
+            w.set_fullscreen(Some(borderless(w)));
         }
     }
 
@@ -551,12 +582,15 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.input.push_back(Input::Close),
             WindowEvent::Focused(f) => self.input.push_back(Input::Focus(f)),
             WindowEvent::Resized(size) => {
+                self.keep_fullscreen();
                 if let Some(gl) = &self.gl {
                     gl.resize(size.width, size.height);
                 }
                 self.draw();
             }
             WindowEvent::RedrawRequested => self.draw(),
+            // moved to another display while fullscreen: fill that one
+            WindowEvent::Moved(_) => self.keep_fullscreen(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 let (x, y) = self.frame_pos();
@@ -591,7 +625,7 @@ impl ApplicationHandler for App {
                     if down && !event.repeat {
                         if let Some(w) = &self.window {
                             let full = w.fullscreen().is_some();
-                            w.set_fullscreen((!full).then_some(winit::window::Fullscreen::Borderless(None)));
+                            w.set_fullscreen((!full).then(|| borderless(w)));
                             super::display::remember_fullscreen(!full);
                         }
                     }

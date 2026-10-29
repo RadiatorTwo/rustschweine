@@ -112,7 +112,7 @@ tracks straight from the `.cue`/`.bin` image in the game folder or above it; the
 volume, which the game sets from master volume x fades; not kept between runs on purpose), `bink.rs`, `gdi32.rs` (bitmaps, DCs).
 Env: `HOGS_SHOT=file.png` (the shown frame; `{t}` in the name keeps all, `HOGS_SHOT_MS` apart), `HOGS_INPUT` (scripted input, see
 `window.rs`; into the first mission: `"1500:click@424,338 8000:Enter 11000:Enter 14000:Enter
-17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s), `HOGS_TRACE_API` (with
+17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s), `HOGS_MONITOR=1` (the window opens on that display), `HOGS_TRACE_API` (with
 arguments), `HOGS_D3D_DUMP=folder` (textures as PNG), `HOGS_D3D_LOG=<texture hex>` (only its
 draws, all vertices), `HOGS_TRACE_MSG`, `HOGS_D3D_LOG`, `HOGS_DD_LOG`, `HOGS_WATCH`.
 
