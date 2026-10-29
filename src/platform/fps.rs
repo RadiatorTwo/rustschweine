@@ -121,13 +121,13 @@ pub fn in_extra() -> bool {
 /// game one step late, so those between can show it moving from there to this step's).
 pub fn render(c: &mut Cpu) {
     if EXTRA.get() || cap() == Some(0) {
-        call_original(c, RENDER);
+        super::wide::around(|| call_original(c, RENDER));
         return;
     }
     DRAWN.set(true);
     let Some(cur) = Cam::read() else {
         CAMS.set(None);
-        call_original(c, RENDER);
+        super::wide::around(|| call_original(c, RENDER));
         return;
     };
     let prev = CAMS.get().map_or(cur, |(_, last, _)| last);
@@ -136,7 +136,7 @@ pub fn render(c: &mut Cpu) {
     prev.write();
     STEPS.set(STEPS.get().wrapping_add(1));
     BLEND.set(Some(0.0));
-    call_original(c, RENDER);
+    super::wide::around(|| call_original(c, RENDER));
     BLEND.set(None);
     // the game's camera stays as the step left it (the drawing may have changed it)
     cur.write();

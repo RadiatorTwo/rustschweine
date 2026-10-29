@@ -26,6 +26,7 @@ pub mod kernel32;
 pub mod misc;
 pub mod sample;
 pub mod user32;
+pub mod wide;
 pub mod window;
 pub mod winmm;
 
