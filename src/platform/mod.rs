@@ -497,18 +497,49 @@ static LAST_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 /// Report an access violation in guest memory (a bad game pointer) before the process dies.
 fn report_fault(kind: &str, a: usize, pc: usize) {
     let base = mem().base as usize;
+    // compiled game code lies in no module; host code in ours (or a system DLL)
+    let module = host_module(pc);
+    let place = match &module {
+        Some(m) => format!("host code {pc:#x} in {m}"),
+        None => {
+            // the recompiled function the code belongs to: the nearest start below it
+            let func = rt::DISPATCH.get().and_then(|d| d.table.iter().filter(|e| e.1 <= pc).max_by_key(|e| e.1).map(|e| e.0));
+            format!("the function at {}", func.map_or("?".into(), crate::image::named))
+        }
+    };
+    let thread = std::thread::current();
+    let thread = format!("thread {} ({})", kernel32::thread_id(), thread.name().unwrap_or("unnamed"));
+    let last = LAST_CALL.load(std::sync::atomic::Ordering::Relaxed);
     if a >= base && a - base < rt::GUEST_SPAN {
-        // the recompiled function the host code belongs to: the nearest start below it
-        let func = rt::DISPATCH.get().and_then(|d| d.table.iter().filter(|e| e.1 <= pc).max_by_key(|e| e.1).map(|e| e.0));
-        log!(
-            "fatal: guest memory {kind} at {:#x} in the function at {} (last import call returned to {:#x})",
-            a - base,
-            func.map_or("?".into(), crate::image::named),
-            LAST_CALL.load(std::sync::atomic::Ordering::Relaxed)
-        );
+        log!("fatal: guest memory {kind} at {:#x} in {place}, {thread} (last import call returned to {last:#x})", a - base);
     } else {
-        log!("fatal: host memory {kind} at {a:#x} (code {pc:#x})");
+        log!("fatal: host memory {kind} at {a:#x} in {place}, {thread} (last import call returned to {last:#x})");
     }
+    if module.is_some() {
+        log!("{}", std::backtrace::Backtrace::force_capture());
+    }
+}
+
+/// The file of the module the code at `pc` belongs to; None for code outside all modules.
+#[cfg(windows)]
+fn host_module(pc: usize) -> Option<String> {
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let mut module = std::ptr::null_mut();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if unsafe { GetModuleHandleExW(flags, pc as *const u16, &mut module) } == 0 {
+        return None;
+    }
+    let mut name = [0u16; 260];
+    let n = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+    let name = String::from_utf16_lossy(&name[..n]);
+    Some(name.rsplit('\\').next().unwrap_or(&name).to_string())
+}
+
+#[cfg(not(windows))]
+fn host_module(_: usize) -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
