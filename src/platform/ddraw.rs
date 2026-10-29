@@ -40,6 +40,9 @@ const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
 const DDSCAPS_VISIBLE: u32 = 0x8000;
 // Blt
 const DDBLT_COLORFILL: u32 = 0x400;
+const DDBLT_DDFX: u32 = 0x800;
+const DDBLTFX_MIRRORLEFTRIGHT: u32 = 2;
+const DDBLTFX_MIRRORUPDOWN: u32 = 4;
 const DDBLT_KEYSRC: u32 = 0x8000;
 const DDBLT_KEYSRCOVERRIDE: u32 = 0x10000;
 const DDBLTFAST_SRCCOLORKEY: u32 = 1;
@@ -685,16 +688,18 @@ fn put(row: u32, x: u32, bpp: u32, v: u32) {
 }
 
 /// Copy src rectangle `sr` to dst rectangle `dr` (stretched if the sizes differ), skipping
-/// source pixels inside the colour key range.
+/// source pixels inside the colour key range. A source rectangle given right to left (or
+/// bottom to top) is copied mirrored (`mirror`).
 fn copy(dst: &Surface, src: &Surface, dr: [i32; 4], sr: [i32; 4], key: Option<(u32, u32)>) {
     let m = mem();
-    let (dw, dh, sw, sh) = (dr[2] - dr[0], dr[3] - dr[1], sr[2] - sr[0], sr[3] - sr[1]);
+    let (dw, dh, sw, sh) = (dr[2] - dr[0], dr[3] - dr[1], (sr[2] - sr[0]).abs(), (sr[3] - sr[1]).abs());
     if dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
         return;
     }
+    let (flip_x, flip_y) = (sr[2] < sr[0], sr[3] < sr[1]);
     let bytes = (src.bpp / 8) as i32;
     // a plain copy row by row (source and destination may be the same surface)
-    if dw == sw && dh == sh && key.is_none() && src.bpp == dst.bpp {
+    if dw == sw && dh == sh && key.is_none() && src.bpp == dst.bpp && !flip_x && !flip_y {
         let order: Vec<i32> = if dst.pixels == src.pixels && dr[1] > sr[1] { (0..dh).rev().collect() } else { (0..dh).collect() };
         for y in order {
             let s = src.pixels + (sr[1] + y) as u32 * src.pitch + (sr[0] * bytes) as u32;
@@ -705,12 +710,12 @@ fn copy(dst: &Surface, src: &Surface, dr: [i32; 4], sr: [i32; 4], key: Option<(u
         return;
     }
     for y in 0..dh {
-        let sy = sr[1] + y * sh / dh;
+        let sy = if flip_y { sr[1] - 1 - y * sh / dh } else { sr[1] + y * sh / dh };
         if sy < 0 || sy >= src.h as i32 || dr[1] + y < 0 || dr[1] + y >= dst.h as i32 {
             continue;
         }
         for x in 0..dw {
-            let sx = sr[0] + x * sw / dw;
+            let sx = if flip_x { sr[0] - 1 - x * sw / dw } else { sr[0] + x * sw / dw };
             let dx = dr[0] + x;
             if sx < 0 || sx >= src.w as i32 || dx < 0 || dx >= dst.w as i32 {
                 continue;
@@ -724,12 +729,27 @@ fn copy(dst: &Surface, src: &Surface, dr: [i32; 4], sr: [i32; 4], key: Option<(u
     }
 }
 
+/// The source rectangle of a blit for the clipped destination `d` (unclipped `d0`), mirrored
+/// as `ddfx` says: then given right to left or bottom to top, the clipping taken off the
+/// opposite side (`s0` the unclipped source, `s` the source clipped unmirrored).
+fn mirror(d0: [i32; 4], d: [i32; 4], s0: [i32; 4], mut s: [i32; 4], ddfx: u32) -> [i32; 4] {
+    for (k, bit) in [(0, DDBLTFX_MIRRORLEFTRIGHT), (1, DDBLTFX_MIRRORUPDOWN)] {
+        if ddfx & bit != 0 {
+            s[k] = s0[k + 2] - (d[k] - d0[k]);
+            s[k + 2] = s0[k] + (d0[k + 2] - d[k + 2]);
+        }
+    }
+    s
+}
+
 fn s_blt(c: &mut Cpu) -> u32 {
     let (this, dr, src, sr, flags, fx) = (arg(c, 0), rect(arg(c, 1)), arg(c, 2), rect(arg(c, 3)), arg(c, 4), arg(c, 5));
     if trace() {
-        log!("Blt {this:#x} {dr:?} <- {src:#x} {sr:?} flags {flags:#x}");
+        log!("Blt {this:#x} {dr:?} <- {src:#x} {sr:?} flags {flags:#x}{}", if flags & DDBLT_DDFX != 0 && fx != 0 { format!(" fx {:#x}", mem().rd32(fx + 4)) } else { String::new() });
     }
     let full = |s: &Surface| [0, 0, s.w as i32, s.h as i32];
+    // the team screen's right column is the left one's pictures mirrored
+    let ddfx = if flags & DDBLT_DDFX != 0 && fx != 0 { mem().rd32(fx + 4) } else { 0 };
     // a copy onto a Direct3D picture not written back yet (a mission's HUD): drawn by GL
     if flags & DDBLT_COLORFILL == 0 && super::d3d::ahead(this) {
         sync(src);
@@ -743,9 +763,11 @@ fn s_blt(c: &mut Cpu) -> u32 {
             None
         };
         let (mut a, mut b) = (dr.unwrap_or(full(dst)), sr.unwrap_or(full(s)));
+        let (a0, b0) = (a, b);
         if a[2] - a[0] == b[2] - b[0] && a[3] - a[1] == b[3] - b[1] {
             clip(dst, Some(s), &mut a, &mut b);
         }
+        let b = mirror(a0, a, b0, b, ddfx);
         drop(d);
         if super::d3d::blit(this, src, a, b, key) {
             return OK;
@@ -771,9 +793,11 @@ fn s_blt(c: &mut Cpu) -> u32 {
             None
         };
         let (mut a, mut b) = (dr.unwrap_or(full(dst)), sr.unwrap_or(full(s)));
+        let (a0, b0) = (a, b);
         if a[2] - a[0] == b[2] - b[0] && a[3] - a[1] == b[3] - b[1] {
             clip(dst, Some(s), &mut a, &mut b);
         }
+        let b = mirror(a0, a, b0, b, ddfx);
         copy(dst, s, a, b, key);
     }
     touched(&mut d, this);
