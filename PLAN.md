@@ -161,8 +161,8 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       Found by every picture (HOGS_SHOT_MS=0, a few seconds), triangles wider than 250 pixels
       and the return address of DrawPrimitive. The first try (objects' corners behind the
       camera kept there, `objects.rs`) was not it but stays (right for trees and the sky's dome)
-- [ ] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
-      crates falling). First try (2026-10-30, not checked by eye yet): the game's objects
+- [x] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
+      crates falling). Done 2026-10-30, checked by eye 2026-10-31 (nothing stutters): the game's objects
       (list at [0x537fbc], next +4, body [obj+0x18] with the position at +4, as the camera's)
       blended between the last two steps like the camera (`fps.rs` `bodies_step`); the hogs'
       bones follow that position (anim record +0x70), so `objects.rs` `smooth` now blends only
