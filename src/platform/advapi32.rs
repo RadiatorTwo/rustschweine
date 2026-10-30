@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Hogs Of War]
-//! Footprint = dword:00000002
+//! Footprint = dword:00000001
 //! LanguageLetter = sz:G
 //! InstallSource = hex(1):443a5c00
 //! ```
@@ -53,13 +53,11 @@ fn unhex(s: &str) -> Vec<u8> {
 impl Registry {
     fn load(&mut self) {
         // as the installer leaves them: installed in C:\Hogs from the CD in D: (both the game
-        // folder, see `host_path`), a full installation (Footprint 2: data from
-        // InstallLocation), German (LanguageLetter G: "Frontschweine", Language\ folders)
+        // folder, see `host_path`), German (LanguageLetter G: "Frontschweine", Language        // folders)
         let k = self.key_mut(HOGS_KEY);
         k.insert("InstallSource".into(), (REG_SZ, b"D:\\\0".to_vec()));
         k.insert("InstallLocation".into(), (REG_SZ, b"C:\\Hogs\\\0".to_vec()));
         k.insert("LanguageLetter".into(), (REG_SZ, b"G\0".to_vec()));
-        k.insert("Footprint".into(), (REG_DWORD, 2u32.to_le_bytes().to_vec()));
         if let Ok(text) = std::fs::read_to_string(game_dir().join("registry.txt")) {
             let mut cur = None;
             for line in text.lines().map(str::trim) {
@@ -84,6 +82,11 @@ impl Registry {
                 }
             }
         }
+        // the installation's size; the game reads it only for the videos (0x43ee10): 2 skips
+        // them, 0 and 1 play them from InstallSource. Set after registry.txt, which kept the 2
+        // we wrote before the videos played
+        let k = self.key_mut(HOGS_KEY);
+        k.insert("Footprint".into(), (REG_DWORD, 1u32.to_le_bytes().to_vec()));
     }
 
     fn save(&self) {

@@ -7,7 +7,6 @@
 //! puts its result in eax and removes the return address and (stdcall) arguments.
 
 pub mod advapi32;
-pub mod bink;
 pub mod cdaudio;
 pub mod crt;
 pub mod d3d;
@@ -697,7 +696,6 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
         "WINMM.DLL" => &[dsound::IMPORTS, misc::IMPORTS, winmm::IMPORTS],
         "OLE32.DLL" => &[misc::IMPORTS],
         "DINPUT.DLL" => &[dinput::IMPORTS],
-        "BINKW32.DLL" => &[bink::IMPORTS],
         _ => &[misc::IMPORTS],
     };
     tables.iter().flat_map(|t| t.iter()).find(|i| i.0 == name)
@@ -719,6 +717,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[
 
 /// The loaded engine DLL (Data/_d3d.dll): its exports, for GetProcAddress.
 static ENGINE_EXPORTS: OnceLock<Vec<(u32, String)>> = OnceLock::new();
+/// binkw32.dll's exports, which the EXE imports.
+static BINK_EXPORTS: OnceLock<Vec<(u32, String)>> = OnceLock::new();
 pub const ENGINE_BASE: u32 = 0x1000_0000;
 
 /// Copy a PE image into guest memory at its base (headers and sections) and bind its imports.
@@ -735,6 +735,14 @@ fn load_image(img: &Image) {
     }
     let mut missing = Vec::new();
     for i in img.imports() {
+        if i.dll.eq_ignore_ascii_case("binkw32.dll") {
+            let e = BINK_EXPORTS.get().and_then(|e| e.iter().find(|e| e.1 == i.name));
+            match e {
+                Some(e) => m.wr32(i.iat, e.0),
+                None => missing.push(i.name.clone()),
+            }
+            continue;
+        }
         let a = match find_import(&i.dll, &i.name) {
             Some(&(name, n, f)) => thunk(name, n, f),
             None => {
@@ -767,6 +775,8 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     m.map(RET_MAGIC, RET_MAGIC + 0x1000);
     init_tib(TIB, STACK_LO, STACK_HI);
     assert_eq!(game.engine.base, ENGINE_BASE, "the engine DLL wants another base");
+    load_image(&game.bink);
+    let _ = BINK_EXPORTS.set(game.bink.exports());
     load_image(&game.exe);
     load_image(&game.engine);
     let _ = ENGINE_EXPORTS.set(game.engine.exports());
@@ -806,6 +816,10 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     c.fs_base = TIB;
     c.r[ESP] = STACK_HI - 64;
     turn_take();
+    // binkw32.dll's DllMain(hinstDLL, DLL_PROCESS_ATTACH, 0), as Windows runs it before the EXE
+    if guest_call(&mut c, game.bink.entry, &[game.bink.base, 1, 0]) == 0 {
+        log!("binkw32.dll: its DllMain failed");
+    }
     c.r[ESP] -= 4;
     m.wr32(c.r[ESP], RET_MAGIC);
     rt::run(&mut c, game.exe.entry);

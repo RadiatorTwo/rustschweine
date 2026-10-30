@@ -78,6 +78,41 @@ impl Image {
         )
     }
 
+    /// Move the image to another base: its relocations (.reloc, HIGHLOW entries) applied to
+    /// the file's bytes, the sections and the entry moved.
+    pub fn rebase(&mut self, base: u32) {
+        let delta = base.wrapping_sub(self.base);
+        let pe = le32(&self.data, 0x3c) as usize;
+        let (rva, size) = (le32(&self.data, pe + 24 + 136), le32(&self.data, pe + 24 + 140));
+        // file offset of a virtual address
+        let file = |img: &Image, a: u32| {
+            let s = img.sections.iter().find(|s| a >= s.va && a < s.va + s.rsize)?;
+            Some((s.raw + a - s.va) as usize)
+        };
+        let mut b = self.base + rva;
+        while b < self.base + rva + size {
+            let (page, len) = (self.u32(b), self.u32(b + 4));
+            if len < 8 {
+                break;
+            }
+            for k in (8..len).step_by(2) {
+                let e = self.read(b + k, 2).map_or(0, |e| u16::from_le_bytes([e[0], e[1]]));
+                if e >> 12 == 3 {
+                    if let Some(o) = file(self, self.base + page + (e & 0xfff) as u32) {
+                        let v = le32(&self.data, o).wrapping_add(delta);
+                        self.data[o..o + 4].copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            b += len;
+        }
+        for s in &mut self.sections {
+            s.va = s.va.wrapping_add(delta);
+        }
+        self.entry = self.entry.wrapping_add(delta);
+        self.base = base;
+    }
+
     /// Several images (each at its own base) as one, for finding and compiling their code
     /// together. Base and entry are the first one's; the headers of the others are left out.
     pub fn combine(parts: &[&Image]) -> Image {

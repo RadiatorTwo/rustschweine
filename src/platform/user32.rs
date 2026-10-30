@@ -684,6 +684,21 @@ fn client_to_screen(_: &mut Cpu) -> u32 {
     1
 }
 
+fn get_cursor_pos(c: &mut Cpu) -> u32 {
+    // only binkw32.dll asks (its own window, not used)
+    mem().wr32(arg(c, 0), 0);
+    mem().wr32(arg(c, 0) + 4, 0);
+    1
+}
+
+/// GetWindowThreadProcessId(hwnd, &pid): all windows are the main thread's.
+fn get_window_thread_process_id(c: &mut Cpu) -> u32 {
+    if arg(c, 1) != 0 {
+        mem().wr32(arg(c, 1), super::kernel32::PROCESS_ID);
+    }
+    1 // the main thread, the first to ask for its id
+}
+
 fn set_rect(c: &mut Cpu) -> u32 {
     write_rect(arg(c, 0), [arg(c, 1) as i32, arg(c, 2) as i32, arg(c, 3) as i32, arg(c, 4) as i32]);
     1
@@ -840,6 +855,14 @@ pub const IMPORTS: &[Import] = &[
     ("AdjustWindowRect", 3, adjust_window_rect),
     ("AdjustWindowRectEx", 4, adjust_window_rect),
     ("ClientToScreen", 2, client_to_screen),
+    ("ScreenToClient", 2, client_to_screen),
+    ("GetCursorPos", 1, get_cursor_pos),
+    ("IsWindowVisible", 1, ret1),
+    ("GetClassLongA", 2, ret0),
+    ("GetActiveWindow", 0, |_| main_window()),
+    ("GetTopWindow", 1, |_| main_window()),
+    ("GetWindow", 2, ret0),
+    ("GetWindowThreadProcessId", 2, get_window_thread_process_id),
     ("SetMenu", 2, ret1),
     ("GetMenu", 1, ret0),
     ("SetActiveWindow", 1, first_arg),

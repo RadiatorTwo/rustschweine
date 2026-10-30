@@ -35,7 +35,7 @@ track 1 MODE1/2352 data, tracks 2... CD audio, music) and its contents extracted
   engine (map, models, sky, sort lists, text) on DirectDraw 7/Direct3D. The EXE loads it with
   LoadLibrary (`_D3D.DLL`) and calls ~90 exports (`afDrawObj`, `afSetMap`, `Begin3D`, ...).
   71 imports.
-- `binkw32.dll`, videos `Language/Streams/*.bik`; data in `Maps/`, `Chars/`, `Skys/`,
+- `binkw32.dll` (Bink 'f', recompiled too), videos `Language/Streams/*.bik` (320x240, 25 fps); data in `Maps/`, `Chars/`, `Skys/`,
   `Audio/` (WAV), `Speech/`, `Language/`, `FEBmps/`, `FEText/`, `FESounds/`.
 - Not needed: the installer (`SETUP.EXE`, `*.cab`, `_INST32I.EX_`), `FEProg.exe`/`wh32LIB.DLL`
   (launcher), `Redist/` (DirectX), `Extras/`.
@@ -98,18 +98,21 @@ How the game starts (`HOGS_TRACE_API=1` shows every import call):
    coordinates staying 640x480 (`HOGS_LOWRES=1`: 640x480); the back buffer's 555 pixels are
    stretched into it when DirectDraw wrote them (`ddraw::Surface::stamp`), and written back
    shrunk before DirectDraw touches them (`d3d::flush`)), DirectPlay + lobby by CoCreateInstance (`dplay.rs`), DirectInput 7 (keyboard and
-   mouse by state, `dinput.rs`), DirectSound (`dsound.rs`, ordinal #1), mixer/MCI (none),
-   Bink (fails: videos skipped).
+   mouse by state, `dinput.rs`), DirectSound (`dsound.rs`, ordinal #1), mixer/MCI (none).
+   Videos: the CD's `binkw32.dll` is recompiled with the EXE and the engine (`game.rs`: moved
+   to 0x12000000 by its relocations, its DllMain run before the EXE's entry). The registry's
+   Footprint is forced to 1: the game reads it only for the videos, 2 skips them.
 6. Title screen (bitmaps by LoadImageA + StretchBlt onto surfaces: `gdi32.rs`), "Taste
    drücken", then the front end: 2D BltFast onto the back buffer, 3D (the team screen's pig)
    by DrawPrimitive, Flip. The missions are all Direct3D (pre-transformed vertices, FVF 0x1c4,
    16-bit 1555 texture atlases, table fog by distance).
 
-Guest memory: EXE at 0x400000, DLL at 0x10000000 (its .data is 30 MB), heap 0x20000000-
+Guest memory: EXE at 0x400000, DLL at 0x10000000 (its .data is 30 MB), binkw32.dll at
+0x12000000, heap 0x20000000-
 0x70000000, thunks 0x7f000000. Other files: `ddraw.rs` (DirectDraw 1/2/7, DDSURFACEDESC2 by
 size), `winmm.rs` (mmio RIFF reading), `cdaudio.rs` (MCI CD audio: the music
 tracks straight from the `.cue`/`.bin` image in the game folder or above it; the mixer's CD
-volume, which the game sets from master volume x fades; not kept between runs on purpose), `bink.rs`, `gdi32.rs` (bitmaps, DCs).
+volume, which the game sets from master volume x fades; not kept between runs on purpose), `gdi32.rs` (bitmaps, DCs).
 Widescreen in missions: `wide.rs` (what the engine cuts at 640 widened while a mission picture is
 drawn), `d3d.rs` `margin`; `HOGS_WIDE=0|1` overrides the launcher's "Breitbild".
 Antialiasing: the launcher's "Antialiasing" list (REG_DWORD `Antialiasing`, samples) multisamples

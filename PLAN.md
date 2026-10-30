@@ -1,6 +1,6 @@
 # Plan — what is done, what is open
 
-Updated 2026-10-29. Details on how things work: CLAUDE.md.
+Updated 2026-10-30. Details on how things work: CLAUDE.md.
 
 ## Done
 
@@ -186,7 +186,13 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
 - [x] Music volume (2026-10-28): a mixer with one line, CD audio, and its volume control
       (`cdaudio.rs`); the game's master slider and fades set it, mixed by `dsound.rs`
 - [ ] Setup must keep the CD image's `.cue` next to the game
-- [ ] Bink videos (`bink.rs`: BinkOpen fails, the game skips them): a Bink 1 decoder
+- [x] Bink videos (2026-10-30): binkw32.dll (from the CD) recompiled with the game, moved to
+      0x12000000 (`Image::rebase`), the EXE's imports bound to its exports, its DllMain run
+      before the EXE's entry. The game skipped the videos because of Footprint 2 (read only in
+      0x43ee10: 2 = no videos); now 1 (from InstallSource). Intro logos seen in shots
+- [ ] Videos: check the sound, flicker between video and title in shots, whether FMV 01/02
+      play after the logos; MMX in binkw32.dll (Paddw, Pmulhw, ... in ~9 functions) not in
+      the lifter: not reached so far
 - [x] High resolution (2026-10-29, `d3d.rs` `Render::phys`): Direct3D draws into a framebuffer
       of the size the window shows the 4:3 picture in (a new size after a flip); the game's
       coordinates stay 640x480 (vertices to clip space by the target's size, viewport and

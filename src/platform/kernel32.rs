@@ -742,6 +742,9 @@ fn get_current_thread_id(_: &mut Cpu) -> u32 {
     thread_id()
 }
 
+/// The one process's id (GetWindowThreadProcessId gives the same).
+pub const PROCESS_ID: u32 = 0x1000;
+
 // ---- time ---------------------------------------------------------------------------------------
 
 pub fn start_time() -> Instant {
@@ -1158,6 +1161,8 @@ pub const IMPORTS: &[Import] = &[
     ("GetCurrentProcess", 0, get_current_process),
     ("GetCurrentThread", 0, get_current_thread),
     ("GetCurrentThreadId", 0, get_current_thread_id),
+    ("GetCurrentProcessId", 0, |_| PROCESS_ID),
+    ("DisableThreadLibraryCalls", 1, |_| 1),
     ("SetHandleCount", 1, first_arg),
     ("SetStdHandle", 2, ret1),
     ("LoadLibraryA", 1, load_library),
