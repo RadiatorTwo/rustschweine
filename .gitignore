@@ -3,3 +3,5 @@
 # build output
 /target/
 shot/
+# input recordings (HOGS_RECORD)
+/aufnahme.txt
