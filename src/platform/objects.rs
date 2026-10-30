@@ -30,8 +30,10 @@
 //! - Way 2 (the sky): fog off while it is drawn (and on after it), not tested for visibility,
 //!   the colour grey [0x1002be68] with the object's alpha, depth 0.9.
 //!
-//! Hogs move smoothly between the game's steps (`smooth`): their bones are kept from the last
-//! two steps' pictures and blended in the pictures between (`fps::blend`).
+//! Hogs move smoothly between the game's steps: their positions are blended by `fps.rs` (the
+//! game's objects), their poses here (`smooth`): the bones, relative to the hog's position
+//! (anim record + 0x70), are kept from the last two steps' pictures and blended in the
+//! pictures between (`fps::blend`).
 //!
 //! `HOGS_OBJECTS=engine`: all by the engine (for comparing);
 //! `HOGS_OBJECTS=check`: our vertices compared with the engine's.
@@ -175,7 +177,8 @@ pub fn draw_obj(c: &mut Cpu) {
 /// The bones a hog has, as the engine keeps them (15 of 12 floats: rows of three, the move).
 type Bones = [[f32; 12]; 15];
 
-/// A hog's bones in the last two steps' pictures, and the number of the last one.
+/// A hog's bones (relative to its position) in the last two steps' pictures, and the number of
+/// the last one.
 struct Hog {
     prev: Bones,
     cur: Bones,
@@ -187,9 +190,12 @@ thread_local! {
     static HOGS: RefCell<HashMap<u32, Hog>> = RefCell::new(HashMap::new());
     /// bones a step's picture showed from the step before: the step's own put back after it
     static SHOWN: RefCell<Vec<(u32, Bones)>> = const { RefCell::new(Vec::new()) };
+    /// the position of the hog being drawn (its anim record + 0x70): the bones' moves are
+    /// blended relative to it (the position itself is blended by `fps.rs`)
+    static ANCHOR: Cell<[f32; 3]> = const { Cell::new([0.0; 3]) };
 }
 
-/// A hog moves farther than this in a step: a jump, not blended.
+/// A hog's pose moves farther than this in a step: a jump, not blended.
 const JUMP: f32 = 1500.0;
 
 /// Blend the hog's bones at `at` (just worked out for this picture) between the last two
@@ -198,7 +204,14 @@ const JUMP: f32 = 1500.0;
 /// (`after_anim_model`); in the pictures between, the transaction undoes them.
 fn smooth(at: u32) {
     let Some((t, step)) = super::fps::blend() else { return };
-    let cur: Bones = std::array::from_fn(|b| std::array::from_fn(|i| f32_at(at + (b * 12 + i) as u32 * 4)));
+    let abs: Bones = std::array::from_fn(|b| std::array::from_fn(|i| f32_at(at + (b * 12 + i) as u32 * 4)));
+    let anchor = ANCHOR.get();
+    let mut cur = abs;
+    for m in &mut cur {
+        for k in 0..3 {
+            m[9 + k] -= anchor[k];
+        }
+    }
     let extra = super::fps::in_extra();
     let shown = HOGS.with_borrow_mut(|hogs| {
         let h = hogs.entry(at).or_insert(Hog { prev: cur, cur, step: step.wrapping_sub(2) });
@@ -211,9 +224,14 @@ fn smooth(at: u32) {
         }
         (h.step == step).then(|| blend_bones(&h.prev, &h.cur, t))
     });
-    let Some(shown) = shown else { return };
+    let Some(mut shown) = shown else { return };
+    for m in &mut shown {
+        for k in 0..3 {
+            m[9 + k] += anchor[k];
+        }
+    }
     if !extra {
-        SHOWN.with_borrow_mut(|s| s.push((at, cur)));
+        SHOWN.with_borrow_mut(|s| s.push((at, abs)));
     }
     for (b, mat) in shown.iter().enumerate() {
         for (i, v) in mat.iter().enumerate() {
@@ -230,6 +248,8 @@ fn smooth(at: u32) {
 
 /// Draw a hog; in a step's picture put back the bones it showed from the step before.
 pub fn draw_anim_model(c: &mut Cpu) {
+    let rec = mem().rd32(c.r[ESP] + 4);
+    ANCHOR.set(std::array::from_fn(|k| f32_at(rec + 0x70 + 4 * k as u32)));
     call_original(c, DRAW_ANIM_MODEL);
     SHOWN.with_borrow_mut(|s| {
         for (at, bones) in s.drain(..) {

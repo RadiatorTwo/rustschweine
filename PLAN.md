@@ -162,8 +162,11 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       and the return address of DrawPrimitive. The first try (objects' corners behind the
       camera kept there, `objects.rs`) was not it but stays (right for trees and the sky's dome)
 - [ ] Still at 25 a second: the hogs' names, shadows and other objects that move (shells,
-      crates falling): they follow the hog by steps (find their positions: afSetObjPos, the
-      text's sort entries)
+      crates falling). First try (2026-10-30, not checked by eye yet): the game's objects
+      (list at [0x537fbc], next +4, body [obj+0x18] with the position at +4, as the camera's)
+      blended between the last two steps like the camera (`fps.rs` `bodies_step`); the hogs'
+      bones follow that position (anim record +0x70), so `objects.rs` `smooth` now blends only
+      the pose, relative to it
 - [ ] More speed: profile with `HOGS_SAMPLE=1` (now Flip ~30%: the swap; see "Next" above)
 - [x] Busy CPU (2026-10-29): with all 16 cores loaded a mission fell from ~550 to ~90 pictures
       a second: PeekMessage gave the time slice away when it found nothing (`yield_now`). Not
@@ -190,9 +193,9 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       0x12000000 (`Image::rebase`), the EXE's imports bound to its exports, its DllMain run
       before the EXE's entry. The game skipped the videos because of Footprint 2 (read only in
       0x43ee10: 2 = no videos); now 1 (from InstallSource). Intro logos seen in shots
-- [ ] Videos: check the sound, flicker between video and title in shots, whether FMV 01/02
-      play after the logos; MMX in binkw32.dll (Paddw, Pmulhw, ... in ~9 functions) not in
-      the lifter: not reached so far
+- [x] Videos checked by the user (2026-10-30): sound plays, no flicker (the shots catch both
+      pages), the intro's videos play one after another. MMX in binkw32.dll (Paddw, Pmulhw,
+      ... in ~9 functions) is not in the lifter: not reached so far
 - [x] High resolution (2026-10-29, `d3d.rs` `Render::phys`): Direct3D draws into a framebuffer
       of the size the window shows the 4:3 picture in (a new size after a flip); the game's
       coordinates stay 640x480 (vertices to clip space by the target's size, viewport and

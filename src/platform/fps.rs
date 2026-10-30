@@ -15,7 +15,8 @@
 
 use super::{EXCLUSIVE, guest_call, heap_state, heap_top, log, mem, set_heap_state};
 use crate::rt::{Cpu, ECX, call_original};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -122,6 +123,76 @@ thread_local! {
     static CAMS: Cell<Option<(Cam, Cam, Instant)>> = const { Cell::new(None) };
 }
 
+/// The game's objects (hogs, shells, crates, ...): a list from [OBJECTS], the next at +4, each
+/// with a body at [obj + 0x18] whose position is floats at +4 (as the camera's). The drawing
+/// takes the hogs' models, names and shadows from there (0x440a20).
+const OBJECTS: u32 = 0x537fbc;
+
+thread_local! {
+    /// Each body's position in the last two steps, by the body's address.
+    static MOVES: RefCell<HashMap<u32, ([f32; 3], [f32; 3])>> = RefCell::new(HashMap::new());
+}
+
+/// The bodies in the object list (not the camera's: it is moved with its angles).
+fn bodies() -> Vec<u32> {
+    let m = mem();
+    let cam = m.rd32(CAMERA);
+    let cam_body = if cam != 0 { m.rd32(cam + 0x18) } else { 0 };
+    let mut out = Vec::new();
+    let mut o = m.rd32(OBJECTS);
+    while o != 0 && out.len() < 4096 {
+        let b = m.rd32(o + 0x18);
+        if b != 0 && b != cam_body {
+            out.push(b);
+        }
+        o = m.rd32(o + 4);
+    }
+    out
+}
+
+fn pos_at(b: u32) -> [f32; 3] {
+    std::array::from_fn(|k| f32::from_bits(mem().rd32(b + 4 + 4 * k as u32)))
+}
+
+/// Write a position, only the words that change (each page written costs a copy).
+fn set_pos(b: u32, p: [f32; 3]) {
+    for (k, v) in p.iter().enumerate() {
+        let a = b + 4 + 4 * k as u32;
+        if mem().rd32(a) != v.to_bits() {
+            mem().wr32(a, v.to_bits());
+        }
+    }
+}
+
+/// A step's picture: the bodies' positions now become the last step's, the ones before the
+/// step before's (a body new or moved farther than a cut starts over); the bodies are put at
+/// the step before for the picture. Returns them with this step's positions, to put back.
+fn bodies_step() -> Vec<(u32, [f32; 3])> {
+    let now: Vec<(u32, [f32; 3])> = bodies().into_iter().map(|b| (b, pos_at(b))).collect();
+    MOVES.with_borrow_mut(|moves| {
+        let mut next = HashMap::with_capacity(now.len());
+        for &(b, cur) in &now {
+            let prev = moves.get(&b).map_or(cur, |&(_, last)| last);
+            let prev = if (0..3).all(|k| (cur[k] - prev[k]).abs() < CUT) { prev } else { cur };
+            next.insert(b, (prev, cur));
+            set_pos(b, prev);
+        }
+        *moves = next;
+    });
+    now
+}
+
+/// An extra picture: the bodies between the last two steps (put back by the transaction).
+fn bodies_between(t: f32) {
+    MOVES.with_borrow(|moves| {
+        for (&b, &(prev, cur)) in moves {
+            if prev != cur {
+                set_pos(b, std::array::from_fn(|k| prev[k] + (cur[k] - prev[k]) * t));
+            }
+        }
+    });
+}
+
 /// Whether an extra picture is being drawn.
 pub fn in_extra() -> bool {
     EXTRA.get()
@@ -144,12 +215,17 @@ pub fn render(c: &mut Cpu) {
     let prev = if prev.near(&cur) { prev } else { cur };
     CAMS.set(Some((prev, cur, Instant::now())));
     prev.write();
+    let now = bodies_step();
     STEPS.set(STEPS.get().wrapping_add(1));
     BLEND.set(Some(0.0));
     super::wide::around(|| call_original(c, RENDER));
     BLEND.set(None);
-    // the game's camera stays as the step left it (the drawing may have changed it)
+    // the game's camera and objects stay as the step left them (the drawing may have changed
+    // the camera)
     cur.write();
+    for (b, p) in now {
+        set_pos(b, p);
+    }
 }
 
 thread_local! {
@@ -210,6 +286,7 @@ fn extra_picture(c: &mut Cpu) {
     if let Some((prev, cur, at)) = CAMS.get() {
         let t = (at.elapsed().as_secs_f32() / STEP_TIME.as_secs_f32()).min(1.0);
         prev.lerp(&cur, t).write();
+        bodies_between(t);
         BLEND.set(Some(t));
     }
     c.r[ECX] = mem().rd32(RENDERER);
