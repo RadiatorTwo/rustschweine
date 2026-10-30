@@ -10,11 +10,11 @@
 //! draw the 3D at the window's size anyway, and its menus are made for 640x480). A
 //! "Vollbild" box goes below Detail Level, a "Breitbild" box (missions' 3D as wide as the
 //! window, `wide.rs`) beside it, below them an "Antialiasing" list (antialiasing,
-//! `display::msaa`).
+//! `display::msaa`) and a "Bildrate" list (pictures per second in missions, `fps.rs`).
 
 use super::template::{Class, Item, Template};
 use super::{Dialog, FIRST_OURS, Kind, Notify};
-use crate::platform::{display, window};
+use crate::platform::{display, fps, window};
 
 /// The launcher's template, by name.
 pub const LAUNCHER: &str = "LAUNCHERBOX";
@@ -33,6 +33,8 @@ const MSAA: u32 = FIRST_OURS + 3;
 const MSAA_LABEL: u32 = FIRST_OURS + 4;
 /// The antialiasing choices: samples per pixel (more than the graphics card has: its most).
 const SAMPLES: [(&str, u32); 4] = [("Aus", 0), ("2x", 2), ("4x", 4), ("8x", 8)];
+const RATE: u32 = FIRST_OURS + 5;
+const RATE_LABEL: u32 = FIRST_OURS + 6;
 
 const VISIBLE: u32 = 0x1000_0000;
 const TABSTOP: u32 = 0x0001_0000;
@@ -57,6 +59,14 @@ pub fn adjust(name: &str, t: &mut Template) {
     let y = y + 13;
     t.items.push(Item { class: Class::Static, id: MSAA_LABEL, text: "Antialiasing".into(), style: VISIBLE, ex_style: 0, rect: [detail[0], y + 2, half, 10] });
     t.items.push(Item { class: Class::ComboBox, id: MSAA, text: String::new(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0] + half, y, detail[2] - half, detail[3]] });
+    let y = y + 14;
+    // one more row: the game's buttons below (Start, Ende) and the dialog's bottom move down
+    for i in t.items.iter_mut().filter(|i| i.id < FIRST_OURS && i.rect[1] >= y - 14) {
+        i.rect[1] += 14;
+    }
+    t.rect[3] += 14;
+    t.items.push(Item { class: Class::Static, id: RATE_LABEL, text: "Bildrate".into(), style: VISIBLE, ex_style: 0, rect: [detail[0], y + 2, half, 10] });
+    t.items.push(Item { class: Class::ComboBox, id: RATE, text: String::new(), style: VISIBLE | TABSTOP | 3, ex_style: 0, rect: [detail[0] + half, y, detail[2] - half, detail[3]] });
 }
 
 pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
@@ -101,6 +111,20 @@ pub(super) fn init(d: &mut Dialog, out: &mut Vec<Notify>) {
             *sel = SAMPLES.iter().rposition(|&(_, n)| n <= samples).unwrap_or(0) as i32;
         }
     }
+    let rate = fps::chosen();
+    if let Some(c) = d.control(RATE) {
+        if let Kind::Combo { items, sel, .. } = &mut c.kind {
+            items.extend(fps::CHOICES.iter().map(|&f| {
+                let text = match f {
+                    0 => "Original (25)".to_string(),
+                    fps::UNLIMITED => "Unbegrenzt".to_string(),
+                    f => f.to_string(),
+                };
+                (text, f)
+            }));
+            *sel = fps::CHOICES.iter().position(|&f| f == rate).unwrap_or(0) as i32;
+        }
+    }
 }
 
 pub fn ok(d: &mut Dialog) {
@@ -123,6 +147,13 @@ pub fn ok(d: &mut Dialog) {
     });
     if let Some(n) = samples {
         display::set_msaa(n);
+    }
+    let rate = d.control(RATE).and_then(|c| match &c.kind {
+        Kind::Combo { items, sel, .. } => items.get(*sel as usize).map(|i| i.1),
+        _ => None,
+    });
+    if let Some(f) = rate {
+        fps::set_chosen(f);
     }
     if let Some(v) = size {
         display::set_chosen((v != 0).then_some((v >> 16, v & 0xffff)));

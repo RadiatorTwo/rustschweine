@@ -10,11 +10,13 @@
 //! from a copy of those ranges, brought up to date before each extra picture with the pages
 //! written since. No other guest thread runs meanwhile (`EXCLUSIVE`). Windows only.
 //!
-//! `HOGS_FPS`: unset or `max` unlimited, a number caps the pictures per second, 0 the original
-//! (one picture per step).
+//! The player chooses the rate in the launcher (REG_DWORD `FrameRate` in the game's key,
+//! pictures per second; 0: the original, one picture per step; missing or 0xffffffff:
+//! unlimited). `HOGS_FPS` overrides it: `max` unlimited, a number caps the pictures per
+//! second, 0 the original.
 
 use super::{EXCLUSIVE, guest_call, heap_state, heap_top, log, mem, set_heap_state};
-use crate::rt::{Cpu, ECX, call_original};
+use crate::rt::{Cpu, EAX, ECX, ESP, call_original};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -37,13 +39,34 @@ const PAGE: usize = 0x1000;
 thread_local! {
     static DRAWN: Cell<bool> = const { Cell::new(false) };
     static LAST_PICTURE: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// With a cap: when the next picture is to be shown (`shown`).
+    static DUE: Cell<Option<Instant>> = const { Cell::new(None) };
     static EXTRA: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `FrameRate`: no cap.
+pub const UNLIMITED: u32 = u32::MAX;
+/// The rates a player can choose (0: the original's 25).
+pub const CHOICES: &[u32] = &[0, 60, 75, 100, 120, 144, 165, 240, UNLIMITED];
+
+/// The saved choice (`FrameRate`; unlimited when missing or not one of `CHOICES`).
+pub fn chosen() -> u32 {
+    let fps = super::advapi32::value("", "FrameRate").and_then(|(_, d)| Some(u32::from_le_bytes(d.get(..4)?.try_into().ok()?)));
+    fps.filter(|f| CHOICES.contains(f)).unwrap_or(UNLIMITED)
+}
+
+/// The launcher's Start: saved (`HOGS_FPS` still overrides it).
+pub fn set_chosen(fps: u32) {
+    super::advapi32::set_value("", "FrameRate", 4, &fps.to_le_bytes());
 }
 
 /// The cap in pictures per second: None unlimited, Some(0) the original.
 fn cap() -> Option<u32> {
     static CAP: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *CAP.get_or_init(|| std::env::var("HOGS_FPS").ok().and_then(|v| v.parse().ok()))
+    *CAP.get_or_init(|| match std::env::var("HOGS_FPS") {
+        Ok(v) => v.parse().ok(),
+        Err(_) => Some(chosen()).filter(|&f| f != UNLIMITED),
+    })
 }
 
 /// Whether pictures are drawn between the steps now (a mission is on): flips do not wait for
@@ -242,12 +265,45 @@ pub fn blend() -> Option<(f32, u32)> {
     BLEND.get().map(|t| (t, STEPS.get()))
 }
 
+thread_local! {
+    /// How long a picture takes to draw (an average): started that much before it is due, it
+    /// is shown when due.
+    static DRAW_TIME: Cell<f32> = const { Cell::new(0.0) };
+    /// What the step returned last.
+    static STEP_RESULT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// With a cap: a picture was shown (flipped) at `end`; the next is due a slot later. Measured
+/// from flip to flip, so the time between pictures stays even (a picture late does not make
+/// the next come early).
+fn shown(start: Instant, end: Instant) {
+    DRAW_TIME.set(DRAW_TIME.get() * 0.9 + (end - start).as_secs_f32() * 0.1);
+    if let Some(n) = cap().filter(|&n| n != 0) {
+        DUE.set(Some(end + Duration::from_secs_f64(1.0 / n as f64)));
+    }
+}
+
 pub fn step(c: &mut Cpu) {
     LAST_STEP.store(super::kernel32::start_time().elapsed().as_millis() as u64, Ordering::Relaxed);
+    // with a cap the step too waits for its slot: its own picture is then shown in it, not
+    // just after an extra one (the logic keeps its pace: it catches up by its own clock)
+    if cap().is_some_and(|n| n != 0)
+        && ACTIVE.load(Ordering::Relaxed)
+        && DUE.get().is_some_and(|d| Instant::now() + Duration::from_secs_f32(DRAW_TIME.get()) < d)
+    {
+        // returns what the step returned last (the game's state), as `ret`
+        c.r[EAX] = STEP_RESULT.get();
+        c.r[ESP] += 4;
+        return;
+    }
     DRAWN.set(false);
+    let start = Instant::now();
     call_original(c, STEP);
+    STEP_RESULT.set(c.r[EAX]);
     if DRAWN.get() {
-        LAST_PICTURE.set(Some(Instant::now()));
+        let end = Instant::now();
+        shown(start, end);
+        LAST_PICTURE.set(Some(end));
         ACTIVE.store(cap() != Some(0), Ordering::Relaxed);
         return;
     }
@@ -257,16 +313,14 @@ pub fn step(c: &mut Cpu) {
         ACTIVE.store(false, Ordering::Relaxed);
         return;
     }
-    if let Some(n) = cap()
-        && last.elapsed() < Duration::from_secs_f64(1.0 / n.max(1) as f64)
-    {
-        return;
-    }
     if mem().rd32(RENDERER) == 0 {
         return;
     }
+    let start = Instant::now();
     extra_picture(c);
-    LAST_PICTURE.set(Some(Instant::now()));
+    let end = Instant::now();
+    shown(start, end);
+    LAST_PICTURE.set(Some(end));
 }
 
 /// Draw a picture and undo what that changed of the game's state.
@@ -400,6 +454,18 @@ pub fn stats() {
     if std::env::var_os("HOGS_FPS_LOG").is_none() {
         return;
     }
+    // the time between flips (frame times)
+    static GAPS: Mutex<(Option<Instant>, Vec<f32>)> = Mutex::new((None, Vec::new()));
+    let gaps = {
+        let mut g = GAPS.lock().unwrap();
+        let now = Instant::now();
+        if let Some(last) = g.0 {
+            g.1.push((now - last).as_secs_f32() * 1000.0);
+        }
+        g.0 = Some(now);
+        g
+    };
+    drop(gaps);
     let mut t = T.lock().unwrap();
     let (since, n) = t.get_or_insert((Instant::now(), 0));
     *n += 1;
@@ -417,6 +483,12 @@ pub fn stats() {
             sum[1] / k,
             sum[2] / k
         );
+        let mut g = std::mem::take(&mut GAPS.lock().unwrap().1);
+        g.sort_by(f32::total_cmp);
+        if !g.is_empty() {
+            let q = |p: f32| g[((g.len() - 1) as f32 * p) as usize];
+            log!("fps: frame times ms: min {:.2} median {:.2} 95% {:.2} 99% {:.2} max {:.2}", g[0], q(0.5), q(0.95), q(0.99), g[g.len() - 1]);
+        }
         *t = None;
     }
 }

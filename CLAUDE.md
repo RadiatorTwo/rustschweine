@@ -87,7 +87,7 @@ How the game starts (`HOGS_TRACE_API=1` shows every import call):
    game folder (`host_path`); the game sets the current folder to D:\.
 4. The launcher, dialog LAUNCHERBOX (device, mode, detail; Start/Ende), shown by our dialog
    overlay (`dialog/`), which opens the window for it. Start writes `launch.bin`. Scripted:
-   `HOGS_INPUT="1500:click@424,338"` (Start, in 640x480 overlay pixels). `dialog/extend.rs`
+   `HOGS_INPUT="1500:click@424,350"` (Start, in 640x480 overlay pixels). `dialog/extend.rs`
    puts our settings in: the display's resolutions instead of the game's modes (the game is
    always given 640x480: it keeps the mode from CBN_SELENDOK, its menus break at others) and
    a "Vollbild" box; saved as `RenderSize` and `Fullscreen` in the game's key (`display.rs`:
@@ -120,7 +120,7 @@ Direct3D's framebuffer (`d3d.rs` `resolve`); `HOGS_MSAA=<samples>` overrides it.
 shaders' outputs are `centroid` (else edge pixels sampled past a ground tile into the atlas's
 transparent border: thin lines between far tiles).
 Env: `HOGS_SHOT=file.png` (the shown frame; `{t}` in the name keeps all, `HOGS_SHOT_MS` apart), `HOGS_INPUT` (scripted input, see
-`window.rs`; into the first mission: `"1500:click@424,338 8000:Enter 11000:Enter 14000:Enter
+`window.rs`; into the first mission: `"1500:click@424,350 8000:Enter 11000:Enter 14000:Enter
 17000:Enter 20000:Enter 23000:Enter 26000:Enter 30000:Enter"`, ~45 s; `HOGS_INPUT=@file.txt`
 reads a file), `HOGS_RECORD=file.txt` (the player's input written as HOGS_INPUT items; F11 a mark:
 time, camera and the picture as `file.txt.<t>.png`), `HOGS_MONITOR=1` (the window opens on that display), `HOGS_TRACE_API` (with
@@ -139,7 +139,8 @@ before writing guest memory). Host code that writes guest memory in a picture sh
 only changed values (each page written costs a copy). The camera ([0x537f98]: position floats
 at [[+0x18]+4], angles +0x84/0x88/0x8c, 4096 a turn) is set between the last two steps; a
 step's own picture shows the step before.
-`HOGS_FPS` = cap (0: original), `HOGS_FPS_LOG=1` statistics, `HOGS_SAMPLE=1` a sampling
+The rate: the launcher's "Bildrate" list (REG_DWORD `FrameRate`: 0 original, 0xffffffff or
+missing unlimited); `HOGS_FPS` overrides it (cap, 0: original, `max`: unlimited), `HOGS_FPS_LOG=1` statistics, `HOGS_SAMPLE=1` a sampling
 profiler (`sample.rs`: guest function / import / host helper the main thread is in).
 The mission's 3D is drawn by our own shaders, not by the engine's CPU code (each checked
 against the engine's vertices): ground and water (`ground.rs`), objects, trees, the sky and the

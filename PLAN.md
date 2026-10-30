@@ -177,7 +177,14 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       (`d3d::Uniform`): ~550 -> ~610. Measured: all objects' GL calls together cost ~6%
       (without them ~670), so drawing objects together (instancing) would bring little and
       change the drawing order; not done
-- [ ] A setting for the rate (registry, Preferences), as future_rust_cop's `FrameRate`
+- [x] A setting for the rate (2026-10-30): the launcher's "Bildrate" list (Original (25), 60 ...
+      240, Unbegrenzt), REG_DWORD `FrameRate` as future_rust_cop's; `HOGS_FPS` overrides it.
+      The launcher's Start and Ende moved down a row: Start is now at click@424,350.
+      Pacing (`fps.rs` `shown`): the next picture is due 1/cap s after the last flip, started
+      the drawing's time before; the step too waits for its slot (returning what it returned
+      last), so its picture does not come right after an extra one (the logic catches up by
+      its own clock, [0x520884]). Before, 240 gave ~175 a second and frame times 1.4-7 ms;
+      now 240 a second, 99% of frame times 3.5-5.1 ms (`HOGS_FPS_LOG` logs them)
 - [ ] Linux: the transaction needs mprotect + SIGSEGV (`fps.rs` is Windows only)
 - [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)
 
@@ -217,4 +224,4 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
       culling factor [0x1013e6b4] is widened (objects at the sides kept) and the weather's
       flakes (screen pixels, wrapped at the screen's width) wrap at the wide width and move
       left by the margin. Not checked yet: explosions and other effects at the sides
-- [ ] A frame rate setting
+- [x] A frame rate setting (see Speed)
