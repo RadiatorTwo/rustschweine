@@ -62,8 +62,9 @@ How (Ghidra 11, needs a JDK 21; details in plain steps: ask Claude):
 - [ ] Settings dialogs the game may open (PIGINFO, WEATHERBOX look like debug dialogs)
 
 ### 4. 3D
-- [ ] Play the first mission through and compare with the original (pictures of the PC
-      version): colours, fog, transparency, the light rays
+- [x] Play the first mission through and compare with the original (pictures of the PC
+      version): colours, fog, transparency, the light rays. Played through by the user
+      (2026-10-31): everything works, the next level loads
 - [ ] Not used so far, not done: colour-key textures, texture stage 1, palette textures,
       untransformed vertices (SetTransform), mipmaps, vertex buffers (warnings say so)
 - [ ] Speed: the 640x480 back buffer is read back each frame (fine now; with high
@@ -189,7 +190,8 @@ view00N.bmp`, by yaw); per tile its 4 corners projected
 - [ ] Front end: 60 Hz is still a little fast; find its intended rate (30? 25?)
 
 ### 5. Rest
-- [ ] DirectSound works for the front end's sounds (from future_rust_cop); check in game
+- [x] DirectSound works for the front end's sounds (from future_rust_cop); checked in a
+      mission by the user (2026-10-31)
 - [x] CD audio tracks (music, 2026-10-28): MCI in `cdaudio.rs`, read from the `.cue`/`.bin`
       image next to the game folder, mixed by `dsound.rs`; the menu plays track 2
 - [x] Music checked by ear in the menu and in a mission (user, 2026-10-28)
